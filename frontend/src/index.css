@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  --brand-primary: #1F4E79;
+  --brand-accent: #E3B505;
+  --brand-neutral: #5A6673;
+  --brand-radius: 0.5rem;
+  --brand-font-heading: Inter, system-ui, sans-serif;
+  --brand-font-body: Inter, system-ui, sans-serif;
+  --brand-surface: #ffffff;
+  --brand-border: #e2e8f0;
+  --brand-fg: #0f172a;
+  --brand-fg-muted: #64748b;
+  --brand-hover: #f1f5f9;
+  --brand-background: #EFF2F5;
+}
+
+body {
+  background: var(--brand-background);
+  color: var(--brand-fg);
+  font-family: var(--brand-font-body);
+  -webkit-font-smoothing: antialiased;
+}
