@@ -16,7 +16,10 @@ from app.database import Base, engine
 
 app = FastAPI(
     title="Retrieval-augmented chatbot answers user questions",
-    description="Create a retrieval-augmented chatbot that answers user questions using the provided context.",
+    description=(
+        "Create a retrieval-augmented chatbot that answers user questions "
+        "using the provided context."
+    ),
     version="0.1.0",
 )
 
