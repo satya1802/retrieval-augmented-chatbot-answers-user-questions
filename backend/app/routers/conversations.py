@@ -268,7 +268,9 @@ def _stream_generated_answer(
         "done",
         {
             "message": MessageOut.model_validate(assistant_message).model_dump(mode="json"),
-            "citations": [CitationOut.model_validate(c).model_dump(mode="json") for c in citation_rows],
+            "citations": [
+                CitationOut.model_validate(c).model_dump(mode="json") for c in citation_rows
+            ],
         },
     )
 
