@@ -1,8 +1,8 @@
 """Toolchain-level tests: the app starts, routes exist and auth is wired.
 
-These do not test feature behaviour -- there isn't any yet. They prove the
-scaffold a development ticket inherits actually works: the OpenAPI app
-boots, every spec'd route resolves instead of 404ing, and a protected route
+The /auth routes are fully implemented (see tests/test_auth.py for their
+behaviour); these tests stay focused on wiring -- the OpenAPI app boots,
+every spec'd route resolves instead of 404ing, and a protected route
 rejects a missing or bad token before reaching its (still-stub) handler.
 """
 
@@ -46,13 +46,13 @@ def test_chunks_lookup_requires_auth(client):
     assert resp.status_code == 401
 
 
-def test_auth_routes_need_no_token_and_are_wired_but_unimplemented(client):
-    resp = client.post("/auth/register", json={"email": "a@example.com", "password": "x"})
-    assert resp.status_code == 501
+def test_auth_register_needs_no_token_and_is_implemented(client):
+    resp = client.post("/auth/register", json={"email": "a@example.com", "password": "Password1"})
+    assert resp.status_code == 202
 
 
 def test_auth_login_validates_its_request_body(client):
-    # Malformed email never reaches the stub -- Pydantic rejects it first.
+    # Malformed email never reaches the handler -- Pydantic rejects it first.
     resp = client.post("/auth/login", json={"email": "not-an-email", "password": "x"})
     assert resp.status_code == 422
 

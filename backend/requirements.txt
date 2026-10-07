@@ -16,6 +16,11 @@ python-multipart>=0.0.12
 # and password hashing for the `users.password_hash` column.
 pyjwt>=2.9
 passlib[bcrypt]>=1.7
+# passlib 1.7.x probes the `bcrypt` module's `__about__.__version__` attribute
+# that bcrypt>=4.1 removed, raising ValueError during hashing instead of a
+# clean ImportError. Pin to the last release passlib's probe still works
+# against.
+bcrypt==4.0.1
 
 # object_store (AWS S3) and queue (AWS SQS) from the approved architecture.
 boto3>=1.35

@@ -6,60 +6,30 @@ import * as UI from "@/lib/ui";
 import { Icons } from "@/lib/icons";
 import { brand } from "@/lib/brand";
 import { useNavigate } from "@/lib/navigate";
+import { ApiError, login, registerAccount, requestPasswordReset } from "@/lib/api";
+import { PASSWORD_RULES, passwordMeetsRules, setToken } from "@/lib/auth";
 
 const { Label } = UI;
 const { Check, X, Bell, Home, Clock, ArrowLeft, ArrowRight, AlertCircle, CheckCircle } = Icons;
 
-const PROTOTYPE_ACCOUNTS = [
-  {
-    email: "maya.okonjo@ferrisloop.com",
-    password: "Harbour-7781",
-    is_verified: true,
-    note: "Verified · 34 documents",
-  },
-  {
-    email: "devi.raman@northquay.org",
-    password: "Lantern-4420",
-    is_verified: true,
-    note: "Verified · 9 documents",
-  },
-  {
-    email: "t.beaumont@ferrisloop.com",
-    password: "Cornice-9003",
-    is_verified: false,
-    note: "Awaiting email verification",
-  },
-];
-
-const PASSWORD_RULES = [
-  { id: "len", label: "At least 10 characters", test: (v) => v.length >= 10 },
-  { id: "num", label: "Contains a number", test: (v) => /\d/.test(v) },
-  {
-    id: "case",
-    label: "Contains upper and lower case letters",
-    test: (v) => /[a-z]/.test(v) && /[A-Z]/.test(v),
-  },
-];
-
 const PRINCIPLES = [
   {
     title: "Answer, then Sources — every time",
-    body:
-      "Each reply names the chunks it drew on, or says plainly that the library does not contain enough information.",
+    body: "Each reply names the chunks it drew on, or says plainly that the library does not contain enough information.",
   },
   {
     title: "Owned by one account",
-    body:
-      "Documents, chunks and conversations are retrievable only by the account that uploaded them. Nothing is shared.",
+    body: "Documents, chunks and conversations are retrievable only by the account that uploaded them. Nothing is shared.",
   },
   {
     title: "Digital text only",
-    body:
-      "PDF, Word, Markdown and plain text. Scanned pages are rejected at ingestion with the reason shown in your library.",
+    body: "PDF, Word, Markdown and plain text. Scanned pages are rejected at ingestion with the reason shown in your library.",
   },
 ];
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+const GENERIC_SIGNIN_ERROR = "Invalid email or password.";
 
 export default function Screen() {
   const navigate = useNavigate();
@@ -72,8 +42,9 @@ export default function Screen() {
   const [errors, setErrors] = React.useState({});
   const [formError, setFormError] = React.useState(null);
   const [unverified, setUnverified] = React.useState(null);
-  const [resendCount, setResendCount] = React.useState(0);
+  const [resendStatus, setResendStatus] = React.useState("idle"); // idle | sending | sent | error
   const [panel, setPanel] = React.useState(null); // {kind, email}
+  const [submitting, setSubmitting] = React.useState(false);
 
   const tabRefs = React.useRef({});
 
@@ -81,7 +52,7 @@ export default function Screen() {
     setErrors({});
     setFormError(null);
     setUnverified(null);
-    setResendCount(0);
+    setResendStatus("idle");
   };
 
   const switchMode = (next) => {
@@ -108,51 +79,68 @@ export default function Screen() {
     if (node && node.focus) node.focus();
   };
 
-  const handleSignIn = (event) => {
+  const handleSignIn = async (event) => {
     event.preventDefault();
     resetMessages();
     const nextErrors = {};
     if (!email.trim()) nextErrors.email = "Enter the email address on your account.";
-    else if (!EMAIL_RE.test(email.trim())) nextErrors.email = "That does not look like an email address.";
+    else if (!EMAIL_RE.test(email.trim()))
+      nextErrors.email = "That does not look like an email address.";
     if (!password) nextErrors.password = "Enter your password.";
     if (Object.keys(nextErrors).length) {
       setErrors(nextErrors);
       return;
     }
-    const account = PROTOTYPE_ACCOUNTS.find(
-      (a) => a.email.toLowerCase() === email.trim().toLowerCase()
-    );
-    if (!account || account.password !== password) {
-      setFormError("Invalid email or password.");
-      return;
+    setSubmitting(true);
+    try {
+      const result = await login(email.trim(), password);
+      setToken(result.access_token);
+      navigate("library");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setUnverified(email.trim());
+      } else {
+        // AC-006: a 401 (and, defensively, any other failure) renders only
+        // the generic message -- never which half of the credential was wrong.
+        setFormError(GENERIC_SIGNIN_ERROR);
+      }
+    } finally {
+      setSubmitting(false);
     }
-    if (!account.is_verified) {
-      setUnverified(account.email);
-      return;
-    }
-    navigate("library");
   };
 
-  const handleRegister = (event) => {
+  const handleRegister = async (event) => {
     event.preventDefault();
     resetMessages();
     const nextErrors = {};
     const trimmed = email.trim();
     if (!trimmed) nextErrors.email = "Enter an email address.";
-    else if (!EMAIL_RE.test(trimmed)) nextErrors.email = "That does not look like an email address.";
-    const unmet = PASSWORD_RULES.filter((r) => !r.test(password));
+    else if (!EMAIL_RE.test(trimmed))
+      nextErrors.email = "That does not look like an email address.";
     if (!password) nextErrors.password = "Choose a password.";
-    else if (unmet.length) nextErrors.password = "Your password does not meet all of the rules below.";
+    else if (!passwordMeetsRules(password))
+      nextErrors.password = "Your password does not meet all of the rules below.";
     if (!confirm) nextErrors.confirm = "Re-enter your password.";
     else if (confirm !== password) nextErrors.confirm = "The two passwords do not match.";
     if (Object.keys(nextErrors).length) {
       setErrors(nextErrors);
       return;
     }
-    setPanel({ kind: "verify-sent", email: trimmed });
+    setSubmitting(true);
+    try {
+      await registerAccount(trimmed, password);
+      // AC-001 / AC-003: this panel renders identically whether or not the
+      // address was already registered -- the server's response is neutral
+      // either way, so there is nothing here to branch on.
+      setPanel({ kind: "verify-sent", email: trimmed });
+    } catch {
+      setFormError("Something went wrong creating your account. Try again.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const handleReset = (event) => {
+  const handleReset = async (event) => {
     event.preventDefault();
     resetMessages();
     const trimmed = email.trim();
@@ -164,13 +152,27 @@ export default function Screen() {
       setErrors({ email: "That does not look like an email address." });
       return;
     }
-    setPanel({ kind: "reset-sent", email: trimmed });
+    setSubmitting(true);
+    try {
+      await requestPasswordReset(trimmed);
+    } catch {
+      // AC-007: the panel is neutral and always shown -- whether the address
+      // exists is never revealed by this request failing or succeeding.
+    } finally {
+      setSubmitting(false);
+      setPanel({ kind: "reset-sent", email: trimmed });
+    }
   };
 
-  const useAccount = (account) => {
-    switchMode("signin");
-    setEmail(account.email);
-    setPassword(account.password);
+  const handleResend = async () => {
+    if (!unverified) return;
+    setResendStatus("sending");
+    try {
+      await registerAccount(unverified, password);
+      setResendStatus("sent");
+    } catch {
+      setResendStatus("error");
+    }
   };
 
   const fieldClass =
@@ -251,7 +253,11 @@ export default function Screen() {
           className="rounded-lg p-6 text-white"
           style={{ backgroundColor: brand.primaryColor, borderRadius: brand.radius }}
         >
-          <h2 id="why-heading" className="text-base font-semibold" style={{ fontFamily: brand.fontHeading }}>
+          <h2
+            id="why-heading"
+            className="text-base font-semibold"
+            style={{ fontFamily: brand.fontHeading }}
+          >
             Every answer sits beside its evidence
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-white/80">
@@ -276,34 +282,7 @@ export default function Screen() {
           </ul>
 
           <div className="mt-6 border-t border-white/20 pt-4">
-            <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/70">
-              Prototype accounts
-            </h3>
-            <ul className="mt-2 space-y-2">
-              {PROTOTYPE_ACCOUNTS.map((account) => (
-                <li
-                  key={account.email}
-                  className="flex items-center justify-between gap-3 rounded border border-white/15 bg-white/5 px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate font-mono text-xs text-white">{account.email}</p>
-                    <p className="truncate font-mono text-[11px] text-white/60">
-                      {account.password} · {account.note}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => useAccount(account)}
-                    className="shrink-0 rounded border border-white/40 px-2 py-1 text-xs font-medium text-white hover:bg-white/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2"
-                    style={{ outlineColor: "#fff" }}
-                    aria-label={`Fill the sign-in form with ${account.email}`}
-                  >
-                    Use
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-3 text-xs leading-relaxed text-white/60">
+            <p className="text-xs leading-relaxed text-white/60">
               Free while in preview. Each account may store 50 documents and ask 200 questions a
               month.
             </p>
@@ -325,7 +304,11 @@ export default function Screen() {
                   className="flex items-center gap-2 text-base font-semibold"
                   style={{ fontFamily: brand.fontHeading, color: "#15202B" }}
                 >
-                  <Icons.Bell className="h-4 w-4" style={{ color: brand.primaryColor }} aria-hidden="true" />
+                  <Icons.Bell
+                    className="h-4 w-4"
+                    style={{ color: brand.primaryColor }}
+                    aria-hidden="true"
+                  />
                   Check your email
                 </h2>
                 <div
@@ -347,18 +330,6 @@ export default function Screen() {
                     </p>
                   )}
                 </div>
-                <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <dt style={{ color: brand.neutralColor }}>Link expires</dt>
-                    <dd className="mt-0.5 font-medium">
-                      {panel.kind === "verify-sent" ? "In 24 hours" : "In 60 minutes"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt style={{ color: brand.neutralColor }}>Sent</dt>
-                    <dd className="mt-0.5 font-medium">6 Oct 2026, 09:14</dd>
-                  </div>
-                </dl>
                 <div className="mt-5 flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -372,7 +343,11 @@ export default function Screen() {
                     type="button"
                     onClick={() => switchMode("signin")}
                     className="inline-flex items-center gap-1.5 rounded border px-3 py-2 text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
-                    style={{ borderColor: "#D7DEE6", color: brand.primaryColor, borderRadius: brand.radius }}
+                    style={{
+                      borderColor: "#D7DEE6",
+                      color: brand.primaryColor,
+                      borderRadius: brand.radius,
+                    }}
                   >
                     <Icons.ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
                     Back to sign in
@@ -414,10 +389,11 @@ export default function Screen() {
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <button
                       type="submit"
-                      className="rounded px-3 py-2 text-sm font-medium text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+                      disabled={submitting}
+                      className="rounded px-3 py-2 text-sm font-medium text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-60"
                       style={{ backgroundColor: brand.primaryColor, borderRadius: brand.radius }}
                     >
-                      Send reset link
+                      {submitting ? "Sending…" : "Send reset link"}
                     </button>
                     <button
                       type="button"
@@ -461,11 +437,11 @@ export default function Screen() {
                           role="alert"
                           className="flex items-start gap-2 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800"
                         >
-                          <Icons.AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                          <p>
-                            <span className="font-semibold">Sign-in failed.</span> {formError} Check
-                            the address and try again.
-                          </p>
+                          <Icons.AlertCircle
+                            className="mt-0.5 h-4 w-4 shrink-0"
+                            aria-hidden="true"
+                          />
+                          <p>{formError}</p>
                         </div>
                       )}
 
@@ -481,7 +457,7 @@ export default function Screen() {
                               can&rsquo;t sign you in until {unverified} is confirmed.
                             </span>
                           </p>
-                          {resendCount > 0 ? (
+                          {resendStatus === "sent" ? (
                             <p className="mt-2 pl-6 text-amber-900">
                               Verification email re-sent to {unverified}. The link expires in 24
                               hours.{" "}
@@ -494,13 +470,23 @@ export default function Screen() {
                               </button>
                             </p>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => setResendCount((c) => c + 1)}
-                              className="ml-6 mt-2 rounded border border-amber-400 bg-white px-2.5 py-1.5 text-xs font-medium text-amber-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
-                            >
-                              Resend verification email
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={handleResend}
+                                disabled={resendStatus === "sending"}
+                                className="ml-6 mt-2 rounded border border-amber-400 bg-white px-2.5 py-1.5 text-xs font-medium text-amber-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-60"
+                              >
+                                {resendStatus === "sending"
+                                  ? "Sending…"
+                                  : "Resend verification email"}
+                              </button>
+                              {resendStatus === "error" && (
+                                <p className="mt-2 pl-6 text-amber-900">
+                                  Could not resend the verification email. Try again.
+                                </p>
+                              )}
+                            </>
                           )}
                         </div>
                       )}
@@ -569,10 +555,11 @@ export default function Screen() {
 
                       <button
                         type="submit"
-                        className="w-full rounded px-3 py-2.5 text-sm font-semibold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+                        disabled={submitting}
+                        className="w-full rounded px-3 py-2.5 text-sm font-semibold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-60"
                         style={{ backgroundColor: brand.primaryColor, borderRadius: brand.radius }}
                       >
-                        Sign in
+                        {submitting ? "Signing in…" : "Sign in"}
                       </button>
 
                       <p className="text-xs leading-relaxed" style={{ color: brand.neutralColor }}>
@@ -582,6 +569,18 @@ export default function Screen() {
                     </form>
                   ) : (
                     <form className="space-y-4" onSubmit={handleRegister} noValidate>
+                      {formError && (
+                        <div
+                          role="alert"
+                          className="flex items-start gap-2 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+                        >
+                          <Icons.AlertCircle
+                            className="mt-0.5 h-4 w-4 shrink-0"
+                            aria-hidden="true"
+                          />
+                          <p>{formError}</p>
+                        </div>
+                      )}
                       <p className="text-sm" style={{ color: brand.neutralColor }}>
                         Registration is free. We send a verification link before the account can
                         sign in.
@@ -603,7 +602,11 @@ export default function Screen() {
                           className={`${fieldClass} mt-1`}
                           style={focusRing}
                         />
-                        <p id="register-email-hint" className="mt-1 text-xs" style={{ color: brand.neutralColor }}>
+                        <p
+                          id="register-email-hint"
+                          className="mt-1 text-xs"
+                          style={{ color: brand.neutralColor }}
+                        >
                           Used for verification, password reset and nothing else.
                         </p>
                         <FieldError field="email" />
@@ -632,9 +635,15 @@ export default function Screen() {
                             return (
                               <li key={rule.id} className="flex items-center gap-2 text-xs">
                                 {met ? (
-                                  <Icons.Check className="h-3.5 w-3.5 text-emerald-700" aria-hidden="true" />
+                                  <Icons.Check
+                                    className="h-3.5 w-3.5 text-emerald-700"
+                                    aria-hidden="true"
+                                  />
                                 ) : (
-                                  <Icons.X className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                                  <Icons.X
+                                    className="h-3.5 w-3.5 text-slate-400"
+                                    aria-hidden="true"
+                                  />
                                 )}
                                 <span style={{ color: met ? "#15803D" : brand.neutralColor }}>
                                   {rule.label}
@@ -667,10 +676,11 @@ export default function Screen() {
 
                       <button
                         type="submit"
-                        className="w-full rounded px-3 py-2.5 text-sm font-semibold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+                        disabled={submitting}
+                        className="w-full rounded px-3 py-2.5 text-sm font-semibold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-60"
                         style={{ backgroundColor: brand.primaryColor, borderRadius: brand.radius }}
                       >
-                        Create account
+                        {submitting ? "Creating account…" : "Create account"}
                       </button>
                     </form>
                   )}
@@ -681,7 +691,11 @@ export default function Screen() {
 
           <div
             className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded border bg-white px-4 py-3 text-xs"
-            style={{ borderColor: "#D7DEE6", borderRadius: brand.radius, color: brand.neutralColor }}
+            style={{
+              borderColor: "#D7DEE6",
+              borderRadius: brand.radius,
+              color: brand.neutralColor,
+            }}
           >
             <p>
               Already have a verification or reset link?{" "}
