@@ -1,173 +1,40 @@
-/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment, react-hooks/rules-of-hooks */
-// @ts-nocheck
 import React from "react";
 
 import * as UI from "@/lib/ui";
 import { Icons } from "@/lib/icons";
 import { brand } from "@/lib/brand";
 import { useNavigate } from "@/lib/navigate";
-
-const { Select } = UI;
-const { Filter } = Icons;
+import {
+  ApiError,
+  deleteDocument,
+  getUsage,
+  listDocuments,
+  renameDocument,
+  type DocumentOut,
+  type DocumentStatus,
+  type UsageResponse,
+} from "@/lib/api";
 
 const { Button, Card, Input, Label, Table, THead, TBody, TR, TH, TD, Separator } = UI;
-const {
-  Upload, Search, FileText, Trash, Edit, CheckCircle, AlertCircle, Clock, X, ArrowRight, Plus,
-} = Icons;
+const { Search, FileText, Trash, Edit, CheckCircle, AlertCircle, Clock, X, ArrowRight, Check } =
+  Icons;
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-const SUPPORTED = ["pdf", "docx", "doc", "md", "txt"];
-const DOCUMENT_CAP = 25;
-const QUESTION_CAP = 200;
-const QUESTIONS_USED = 63;
-const WINDOW_RESETS = "1 Nov 2026";
-
-const INITIAL_DOCUMENTS = [
-  {
-    id: "doc_8f21",
-    owner_id: "usr_01",
-    title: "Vendor Master Services Agreement 2026",
-    file_type: "pdf",
-    storage_key: "u01/2026/09/msa-2026-final.pdf",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-09-28T09:14:00Z",
-    chunk_count: 184,
-  },
-  {
-    id: "doc_7c04",
-    owner_id: "usr_01",
-    title: "Q3 Financial Controls Review",
-    file_type: "docx",
-    storage_key: "u01/2026/09/q3-controls-review.docx",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-09-29T16:02:00Z",
-    chunk_count: 97,
-  },
-  {
-    id: "doc_6b55",
-    owner_id: "usr_01",
-    title: "Incident Postmortem — Payments Outage, 14 Sep",
-    file_type: "md",
-    storage_key: "u01/2026/09/postmortem-payments.md",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-09-30T11:48:00Z",
-    chunk_count: 42,
-  },
-  {
-    id: "doc_5a18",
-    owner_id: "usr_01",
-    title: "SOC 2 Type II Report (FY25)",
-    file_type: "pdf",
-    storage_key: "u01/2026/10/soc2-fy25-signed.pdf",
-    status: "failed",
-    failure_reason:
-      "No readable text was found. This PDF contains scanned page images only, and documents requiring OCR are not supported in this version.",
-    uploaded_at: "2026-10-01T08:21:00Z",
-    chunk_count: 0,
-  },
-  {
-    id: "doc_4e72",
-    owner_id: "usr_01",
-    title: "Employee Handbook v4.2",
-    file_type: "pdf",
-    storage_key: "u01/2026/10/handbook-v4-2.pdf",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-10-01T14:35:00Z",
-    chunk_count: 310,
-  },
-  {
-    id: "doc_3d90",
-    owner_id: "usr_01",
-    title: "Data Processing Addendum — Northwind",
-    file_type: "docx",
-    storage_key: "u01/2026/10/dpa-northwind.docx",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-10-02T10:07:00Z",
-    chunk_count: 58,
-  },
-  {
-    id: "doc_2f33",
-    owner_id: "usr_01",
-    title: "Board Minutes 2026-09-24",
-    file_type: "txt",
-    storage_key: "u01/2026/10/board-minutes-0924.txt",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-10-02T17:55:00Z",
-    chunk_count: 21,
-  },
-  {
-    id: "doc_1a47",
-    owner_id: "usr_01",
-    title: "Insurance Policy — Cyber Liability",
-    file_type: "pdf",
-    storage_key: "u01/2026/10/cyber-liability-policy.pdf",
-    status: "failed",
-    failure_reason:
-      "Text extraction failed: the file is password-protected and could not be opened. No partial chunks remain in the search index.",
-    uploaded_at: "2026-10-03T09:12:00Z",
-    chunk_count: 0,
-  },
-  {
-    id: "doc_9b61",
-    owner_id: "usr_01",
-    title: "Records Retention Schedule 2026",
-    file_type: "txt",
-    storage_key: "u01/2026/10/retention-schedule.txt",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-10-04T13:26:00Z",
-    chunk_count: 33,
-  },
-  {
-    id: "doc_0c28",
-    owner_id: "usr_01",
-    title: "Procurement Policy (Rev C)",
-    file_type: "docx",
-    storage_key: "u01/2026/10/procurement-rev-c.docx",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-10-05T08:44:00Z",
-    chunk_count: 76,
-  },
-  {
-    id: "doc_ab19",
-    owner_id: "usr_01",
-    title: "Customer Contract — Halden Group",
-    file_type: "pdf",
-    storage_key: "u01/2026/10/halden-contract.pdf",
-    status: "ready",
-    failure_reason: null,
-    uploaded_at: "2026-10-05T15:03:00Z",
-    chunk_count: 142,
-  },
-  {
-    id: "doc_cd77",
-    owner_id: "usr_01",
-    title: "Supplier Risk Register — working notes",
-    file_type: "md",
-    storage_key: "u01/2026/10/supplier-risk-notes.md",
-    status: "processing",
-    failure_reason: null,
-    uploaded_at: "2026-10-06T07:58:00Z",
-    chunk_count: 0,
-  },
-];
-
-const FILTERS = [
+const FILTERS: Array<{ id: "all" | DocumentStatus; label: string }> = [
   { id: "all", label: "All" },
   { id: "ready", label: "Ready" },
   { id: "processing", label: "Processing" },
   { id: "failed", label: "Failed" },
 ];
 
-function formatStamp(iso) {
+// How often to re-poll GET /documents while any document is still
+// 'processing' (AC-026). Stops the moment none are.
+const POLL_INTERVAL_MS = 4000;
+
+type LoadState = "loading" | "ready" | "error";
+
+function formatStamp(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "—";
   const hh = String(d.getUTCHours()).padStart(2, "0");
@@ -175,19 +42,14 @@ function formatStamp(iso) {
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${hh}:${mm}`;
 }
 
-function extensionOf(name) {
-  const parts = String(name).split(".");
-  return parts.length > 1 ? parts.pop().toLowerCase() : "";
+function formatDateOnly(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
-function estimateChunks(title) {
-  let h = 0;
-  for (let i = 0; i < title.length; i++) h = (h * 31 + title.charCodeAt(i)) % 997;
-  return 24 + (h % 160);
-}
-
-function StatusChip({ status }) {
-  const map = {
+function StatusChip({ status }: { status: DocumentStatus }) {
+  const map: Record<string, { label: string; Icon: typeof CheckCircle; style: React.CSSProperties }> = {
     ready: {
       label: "Ready",
       Icon: CheckCircle,
@@ -204,7 +66,7 @@ function StatusChip({ status }) {
       style: { backgroundColor: "#FBEAEA", color: "#8C1D18", borderColor: "#E4B6B3" },
     },
   };
-  const conf = map[status] || map.processing;
+  const conf = map[status] ?? map.processing;
   const Ico = conf.Icon;
   return (
     <span
@@ -219,51 +81,85 @@ function StatusChip({ status }) {
 
 export default function Screen() {
   const navigate = useNavigate();
-  const [documents, setDocuments] = React.useState(INITIAL_DOCUMENTS);
+
+  const [documents, setDocuments] = React.useState<DocumentOut[]>([]);
+  const [docState, setDocState] = React.useState<LoadState>("loading");
+  const [docError, setDocError] = React.useState("");
+
+  const [usage, setUsage] = React.useState<UsageResponse | null>(null);
+  const [usageState, setUsageState] = React.useState<LoadState>("loading");
+  const [usageError, setUsageError] = React.useState("");
+
   const [query, setQuery] = React.useState("");
-  const [filter, setFilter] = React.useState("all");
-  const [selectedId, setSelectedId] = React.useState("doc_5a18");
+  const [filter, setFilter] = React.useState<"all" | DocumentStatus>("all");
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [editing, setEditing] = React.useState(false);
   const [draftTitle, setDraftTitle] = React.useState("");
   const [renameError, setRenameError] = React.useState("");
-  const [uploadError, setUploadError] = React.useState("");
+  const [renaming, setRenaming] = React.useState(false);
   const [announcement, setAnnouncement] = React.useState("");
-  const [deleteTarget, setDeleteTarget] = React.useState(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<DocumentOut | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState("");
 
-  const confirmRef = React.useRef(null);
-  const returnFocusRef = React.useRef(null);
-  const searchRef = React.useRef(null);
+  const confirmRef = React.useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = React.useRef<HTMLElement | null>(null);
 
-  // Ingestion: newly uploaded / retried documents move from processing to ready
-  // while the user is on the screen (no sign-out required).
+  const loadDocuments = React.useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setDocState("loading");
+    try {
+      const res = await listDocuments();
+      setDocuments(res.documents);
+      setDocState("ready");
+      setDocError("");
+    } catch (err) {
+      setDocState("error");
+      setDocError(
+        err instanceof ApiError ? err.message : "Could not load your documents. Try again.",
+      );
+    }
+  }, []);
+
+  const loadUsage = React.useCallback(async () => {
+    setUsageState("loading");
+    try {
+      const res = await getUsage();
+      setUsage(res);
+      setUsageState("ready");
+      setUsageError("");
+    } catch (err) {
+      setUsageState("error");
+      setUsageError(err instanceof ApiError ? err.message : "Could not load usage.");
+    }
+  }, []);
+
   React.useEffect(() => {
-    const pending = documents.filter((d) => d.status === "processing" && d.ingesting);
-    if (pending.length === 0) return undefined;
-    const timer = setTimeout(() => {
-      setDocuments((prev) =>
-        prev.map((d) =>
-          d.ingesting && d.status === "processing"
-            ? { ...d, status: "ready", ingesting: false, chunk_count: estimateChunks(d.title) }
-            : d
-        )
-      );
-      setAnnouncement(
-        pending.length === 1
-          ? `“${pending[0].title}” finished ingesting and is now ready for retrieval.`
-          : `${pending.length} documents finished ingesting and are now ready for retrieval.`
-      );
-    }, 2800);
-    return () => clearTimeout(timer);
-  }, [documents]);
+    void loadDocuments();
+    void loadUsage();
+  }, [loadDocuments, loadUsage]);
+
+  // AC-026: a document whose status changes server-side (processing -> ready
+  // or failed) updates here without a sign-out/sign-in cycle. Poll only
+  // while something is still processing; stop the moment none are.
+  React.useEffect(() => {
+    const hasProcessing = documents.some((d) => d.status === "processing");
+    if (!hasProcessing) return undefined;
+    const timer = setInterval(() => {
+      void loadDocuments({ silent: true });
+      void loadUsage();
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [documents, loadDocuments, loadUsage]);
 
   React.useEffect(() => {
     if (!deleteTarget) return undefined;
-    const onKey = (e) => {
+    const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") closeDialog();
     };
     window.addEventListener("keydown", onKey);
     if (confirmRef.current) confirmRef.current.focus();
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deleteTarget]);
 
   const counts = React.useMemo(
@@ -273,11 +169,8 @@ export default function Screen() {
       processing: documents.filter((d) => d.status === "processing").length,
       failed: documents.filter((d) => d.status === "failed").length,
     }),
-    [documents]
+    [documents],
   );
-
-  const indexedChunks = documents.reduce((sum, d) => sum + (d.chunk_count || 0), 0);
-  const remainingQuestions = QUESTION_CAP - QUESTIONS_USED;
 
   const visible = documents.filter((d) => {
     const matchesFilter = filter === "all" || d.status === filter;
@@ -289,74 +182,10 @@ export default function Screen() {
 
   const selected = documents.find((d) => d.id === selectedId) || null;
 
-  function selectDocument(id) {
+  function selectDocument(id: string) {
     setSelectedId(id);
     setEditing(false);
     setRenameError("");
-  }
-
-  function handleUpload(event) {
-    const files = Array.from(event.target.files || []);
-    event.target.value = "";
-    if (files.length === 0) return;
-
-    const accepted = [];
-    const rejected = [];
-    files.forEach((f) => {
-      const ext = extensionOf(f.name);
-      if (SUPPORTED.includes(ext)) accepted.push({ file: f, ext });
-      else rejected.push(f.name);
-    });
-
-    const capacity = DOCUMENT_CAP - documents.length;
-    if (capacity <= 0) {
-      setUploadError(
-        `You have reached the ${DOCUMENT_CAP}-document limit for this account. Delete a document to free capacity before uploading another.`
-      );
-      return;
-    }
-
-    const takeable = accepted.slice(0, capacity);
-    const overflow = accepted.length - takeable.length;
-
-    const created = takeable.map((item, i) => {
-      const baseTitle = item.file.name.replace(/\.[^.]+$/, "");
-      return {
-        id: `doc_new_${Date.now()}_${i}`,
-        owner_id: "usr_01",
-        title: baseTitle,
-        file_type: item.ext === "doc" ? "docx" : item.ext,
-        storage_key: `u01/2026/10/${item.file.name}`,
-        status: "processing",
-        failure_reason: null,
-        uploaded_at: new Date().toISOString(),
-        chunk_count: 0,
-        ingesting: true,
-      };
-    });
-
-    const messages = [];
-    if (created.length > 0) {
-      setDocuments((prev) => [...created, ...prev]);
-      setSelectedId(created[0].id);
-      setEditing(false);
-      setAnnouncement(
-        created.length === 1
-          ? `“${created[0].title}” uploaded. Extraction and embedding are running.`
-          : `${created.length} documents uploaded. Each is being ingested independently.`
-      );
-    }
-    if (rejected.length > 0) {
-      messages.push(
-        `${rejected.join(", ")} was not uploaded — unsupported file type. Supported types are PDF, Word (.docx), Markdown (.md) and plain text (.txt).`
-      );
-    }
-    if (overflow > 0) {
-      messages.push(
-        `${overflow} file(s) exceeded the ${DOCUMENT_CAP}-document limit. Delete a document to free capacity.`
-      );
-    }
-    setUploadError(messages.join(" "));
   }
 
   function startRename() {
@@ -366,52 +195,66 @@ export default function Screen() {
     setEditing(true);
   }
 
-  function submitRename(e) {
+  async function submitRename(e: React.FormEvent) {
     e.preventDefault();
-    if (draftTitle.trim() === "") {
+    if (!selected) return;
+    // AC-030: an empty or whitespace-only title is rejected client-side,
+    // no request is sent, the previous title is retained.
+    const trimmed = draftTitle.trim();
+    if (trimmed === "") {
       setRenameError("Enter a title. A blank title is not saved and the previous title is kept.");
       return;
     }
-    const previous = selected.title;
-    const next = draftTitle.trim();
-    setDocuments((prev) => prev.map((d) => (d.id === selected.id ? { ...d, title: next } : d)));
-    setEditing(false);
+    setRenaming(true);
     setRenameError("");
-    setAnnouncement(`“${previous}” renamed to “${next}”. Future answers will cite the new title.`);
+    try {
+      // AC-028, AC-029: save via PATCH and render only the API-returned
+      // title -- no local title cache.
+      const updated = await renameDocument(selected.id, trimmed);
+      const previousTitle = selected.title;
+      setDocuments((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+      setEditing(false);
+      setAnnouncement(`"${previousTitle}" renamed to "${updated.title}".`);
+    } catch (err) {
+      setRenameError(
+        err instanceof ApiError ? err.message : "Could not save the title. Try again.",
+      );
+    } finally {
+      setRenaming(false);
+    }
   }
 
-  function retryIngestion(doc) {
-    setDocuments((prev) =>
-      prev.map((d) =>
-        d.id === doc.id
-          ? { ...d, status: "processing", failure_reason: null, ingesting: true, chunk_count: 0 }
-          : d
-      )
-    );
-    setAnnouncement(`Retrying ingestion for “${doc.title}”.`);
-  }
-
-  function openDeleteDialog(doc, event) {
-    returnFocusRef.current = event && event.currentTarget ? event.currentTarget : null;
+  function openDeleteDialog(doc: DocumentOut, event: React.MouseEvent<HTMLElement>) {
+    returnFocusRef.current = event.currentTarget;
+    setDeleteError("");
     setDeleteTarget(doc);
   }
 
   function closeDialog() {
     setDeleteTarget(null);
-    if (returnFocusRef.current && returnFocusRef.current.focus) {
-      returnFocusRef.current.focus();
-    }
+    setDeleteError("");
+    if (returnFocusRef.current) returnFocusRef.current.focus();
   }
 
-  function confirmDelete() {
-    const doc = deleteTarget;
-    setDocuments((prev) => prev.filter((d) => d.id !== doc.id));
-    if (selectedId === doc.id) setSelectedId(null);
-    setDeleteTarget(null);
-    setAnnouncement(
-      `“${doc.title}” deleted. Its ${doc.chunk_count} chunks were removed from the search index and can no longer be retrieved or cited.`
-    );
-    if (searchRef.current) searchRef.current.focus();
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deleteDocument(deleteTarget.id);
+      const title = deleteTarget.title;
+      setDocuments((prev) => prev.filter((d) => d.id !== deleteTarget.id));
+      if (selectedId === deleteTarget.id) setSelectedId(null);
+      setDeleteTarget(null);
+      setAnnouncement(`"${title}" deleted. It can no longer be retrieved or cited.`);
+      void loadUsage();
+    } catch (err) {
+      setDeleteError(
+        err instanceof ApiError ? err.message : "Could not delete the document. Try again.",
+      );
+    } finally {
+      setDeleting(false);
+    }
   }
 
   const panelHeading = "text-[13px] font-semibold uppercase tracking-wide";
@@ -430,8 +273,8 @@ export default function Screen() {
             My document library
           </h1>
           <p className="mt-1 max-w-2xl text-sm" style={{ color: brand.neutralColor }}>
-            Everything here is private to sai.kiron@quorq.ai. Only documents marked{" "}
-            <strong className="font-semibold">Ready</strong> are searched when you ask a question.
+            Only documents marked <strong className="font-semibold">Ready</strong> are searched
+            when you ask a question.
           </p>
         </div>
         <Button
@@ -445,47 +288,69 @@ export default function Screen() {
       </div>
 
       <h2 className="sr-only">Account usage</h2>
-      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <Card className="p-3">
-          <p className="text-xs font-medium uppercase tracking-wide" style={{ color: brand.neutralColor }}>
+          <p
+            className="text-xs font-medium uppercase tracking-wide"
+            style={{ color: brand.neutralColor }}
+          >
             Documents stored
           </p>
-          <p className="mt-1 text-2xl font-semibold tabular-nums" style={{ color: brand.primaryColor }}>
-            {documents.length}
-            <span className="text-base font-normal" style={{ color: brand.neutralColor }}>
-              {" "}
-              / {DOCUMENT_CAP}
-            </span>
-          </p>
-          <p className="mt-1 text-xs" style={{ color: brand.neutralColor }}>
-            {DOCUMENT_CAP - documents.length} slots free · deleting a document frees capacity
-          </p>
+          {usageState === "loading" ? (
+            <p className="mt-1 text-sm" style={{ color: brand.neutralColor }}>
+              Loading…
+            </p>
+          ) : usageState === "error" || !usage ? (
+            <p role="alert" className="mt-1 text-sm" style={{ color: "#8C1D18" }}>
+              {usageError || "Could not load usage."}
+            </p>
+          ) : (
+            <>
+              <p
+                className="mt-1 text-2xl font-semibold tabular-nums"
+                style={{ color: brand.primaryColor }}
+              >
+                {usage.document_count}
+                <span className="text-base font-normal" style={{ color: brand.neutralColor }}>
+                  {" "}
+                  / {usage.documents_cap}
+                </span>
+              </p>
+              <p className="mt-1 text-xs" style={{ color: brand.neutralColor }}>
+                {Math.max(0, usage.documents_cap - usage.document_count)} slots free · deleting a
+                document frees capacity
+              </p>
+            </>
+          )}
         </Card>
         <Card className="p-3">
-          <p className="text-xs font-medium uppercase tracking-wide" style={{ color: brand.neutralColor }}>
+          <p
+            className="text-xs font-medium uppercase tracking-wide"
+            style={{ color: brand.neutralColor }}
+          >
             Questions remaining this month
           </p>
-          <p className="mt-1 text-2xl font-semibold tabular-nums" style={{ color: brand.primaryColor }}>
-            {remainingQuestions}
-            <span className="text-base font-normal" style={{ color: brand.neutralColor }}>
-              {" "}
-              / {QUESTION_CAP}
-            </span>
-          </p>
-          <p className="mt-1 text-xs" style={{ color: brand.neutralColor }}>
-            {QUESTIONS_USED} used · resets {WINDOW_RESETS}
-          </p>
-        </Card>
-        <Card className="p-3">
-          <p className="text-xs font-medium uppercase tracking-wide" style={{ color: brand.neutralColor }}>
-            Chunks in your index
-          </p>
-          <p className="mt-1 text-2xl font-semibold tabular-nums" style={{ color: brand.primaryColor }}>
-            {indexedChunks.toLocaleString()}
-          </p>
-          <p className="mt-1 text-xs" style={{ color: brand.neutralColor }}>
-            Across {counts.ready} ready document{counts.ready === 1 ? "" : "s"} · 800-token chunks, 120 overlap
-          </p>
+          {usageState === "loading" ? (
+            <p className="mt-1 text-sm" style={{ color: brand.neutralColor }}>
+              Loading…
+            </p>
+          ) : usageState === "error" || !usage ? (
+            <p role="alert" className="mt-1 text-sm" style={{ color: "#8C1D18" }}>
+              {usageError || "Could not load usage."}
+            </p>
+          ) : (
+            <>
+              <p
+                className="mt-1 text-2xl font-semibold tabular-nums"
+                style={{ color: brand.primaryColor }}
+              >
+                {usage.remaining_questions}
+              </p>
+              <p className="mt-1 text-xs" style={{ color: brand.neutralColor }}>
+                Resets {formatDateOnly(usage.reset_date)}
+              </p>
+            </>
+          )}
         </Card>
       </div>
 
@@ -496,36 +361,6 @@ export default function Screen() {
             <h2 className={panelHeading} style={{ color: brand.primaryColor }}>
               Documents
             </h2>
-
-            <div className="mt-3 rounded-md border border-dashed border-slate-300 bg-slate-50 p-3">
-              <Label htmlFor="file-upload" className="text-sm font-medium">
-                Upload documents
-              </Label>
-              <p id="upload-hint" className="mt-0.5 text-xs" style={{ color: brand.neutralColor }}>
-                PDF, Word (.docx), Markdown (.md) or plain text (.txt). Digital text only — scanned pages
-                are not supported. Select several files to ingest each one separately.
-              </p>
-              <input
-                id="file-upload"
-                type="file"
-                multiple
-                accept=".pdf,.docx,.doc,.md,.txt"
-                onChange={handleUpload}
-                aria-describedby="upload-hint"
-                className="mt-2 block w-full cursor-pointer rounded-md border border-slate-300 bg-white p-1.5 text-sm file:mr-3 file:cursor-pointer file:rounded file:border-0 file:bg-[#1F4E79] file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
-                style={{ outlineColor: brand.primaryColor }}
-              />
-              {uploadError ? (
-                <p
-                  role="alert"
-                  className="mt-2 flex items-start gap-1.5 rounded border border-[#E4B6B3] bg-[#FBEAEA] p-2 text-xs"
-                  style={{ color: "#8C1D18" }}
-                >
-                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  <span>{uploadError}</span>
-                </p>
-              ) : null}
-            </div>
 
             <div className="mt-3 flex flex-wrap items-end gap-3">
               <div className="min-w-[200px] flex-1">
@@ -540,7 +375,6 @@ export default function Screen() {
                   />
                   <Input
                     id="doc-search"
-                    ref={searchRef}
                     type="search"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -549,7 +383,11 @@ export default function Screen() {
                   />
                 </div>
               </div>
-              <div role="group" aria-label="Filter documents by status" className="flex flex-wrap gap-1.5">
+              <div
+                role="group"
+                aria-label="Filter documents by status"
+                className="flex flex-wrap gap-1.5"
+              >
                 {FILTERS.map((f) => {
                   const active = filter === f.id;
                   return (
@@ -561,37 +399,77 @@ export default function Screen() {
                       className="rounded-md border px-2.5 py-1.5 text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1"
                       style={
                         active
-                          ? { backgroundColor: brand.primaryColor, color: "#FFFFFF", borderColor: brand.primaryColor }
-                          : { backgroundColor: "#FFFFFF", color: brand.neutralColor, borderColor: "#CBD5E1" }
+                          ? {
+                              backgroundColor: brand.primaryColor,
+                              color: "#FFFFFF",
+                              borderColor: brand.primaryColor,
+                            }
+                          : {
+                              backgroundColor: "#FFFFFF",
+                              color: brand.neutralColor,
+                              borderColor: "#CBD5E1",
+                            }
                       }
                     >
-                      {f.label} ({counts[f.id]})
+                      {f.label} ({counts[f.id as keyof typeof counts] ?? 0})
                     </button>
                   );
                 })}
               </div>
             </div>
 
-            <p role="status" aria-live="polite" className="mt-2 min-h-[1rem] text-xs" style={{ color: brand.primaryColor }}>
+            <p
+              role="status"
+              aria-live="polite"
+              className="mt-2 min-h-[1rem] text-xs"
+              style={{ color: brand.primaryColor }}
+            >
               {announcement}
             </p>
           </div>
 
-          {documents.length === 0 ? (
+          {docState === "loading" ? (
+            <div className="p-10 text-center text-sm" style={{ color: brand.neutralColor }}>
+              Loading your documents…
+            </div>
+          ) : docState === "error" ? (
             <div className="p-10 text-center">
-              <FileText className="mx-auto h-8 w-8" aria-hidden="true" style={{ color: brand.neutralColor }} />
+              <AlertCircle
+                className="mx-auto h-8 w-8"
+                aria-hidden="true"
+                style={{ color: "#8C1D18" }}
+              />
+              <p role="alert" className="mt-2 text-sm" style={{ color: "#8C1D18" }}>
+                {docError}
+              </p>
+              <Button className="mt-3" onClick={() => void loadDocuments()}>
+                Try again
+              </Button>
+            </div>
+          ) : documents.length === 0 ? (
+            <div className="p-10 text-center">
+              <FileText
+                className="mx-auto h-8 w-8"
+                aria-hidden="true"
+                style={{ color: brand.neutralColor }}
+              />
               <h3 className="mt-2 text-sm font-semibold">Your library is empty</h3>
               <p className="mx-auto mt-1 max-w-sm text-sm" style={{ color: brand.neutralColor }}>
-                Upload a PDF, Word, Markdown or plain-text file to start. Until a document is ready, the
-                chatbot has nothing to answer from.
+                Upload a PDF, Word, Markdown or plain-text file to start. Until a document is
+                ready, the chatbot has nothing to answer from.
               </p>
             </div>
           ) : visible.length === 0 ? (
             <div className="p-10 text-center">
-              <Search className="mx-auto h-8 w-8" aria-hidden="true" style={{ color: brand.neutralColor }} />
+              <Search
+                className="mx-auto h-8 w-8"
+                aria-hidden="true"
+                style={{ color: brand.neutralColor }}
+              />
               <h3 className="mt-2 text-sm font-semibold">No documents match</h3>
               <p className="mt-1 text-sm" style={{ color: brand.neutralColor }}>
-                No document matches “{query}” with the {FILTERS.find((f) => f.id === filter).label.toLowerCase()} filter.
+                No document matches "{query}" with the{" "}
+                {FILTERS.find((f) => f.id === filter)?.label.toLowerCase()} filter.
               </p>
               <Button
                 className="mt-3"
@@ -607,7 +485,7 @@ export default function Screen() {
             <div className="overflow-x-auto">
               <Table>
                 <caption className="sr-only">
-                  Your uploaded documents with file type, upload date, ingestion status and indexed chunk count
+                  Your uploaded documents with file type, upload date and ingestion status
                 </caption>
                 <THead>
                   <TR>
@@ -615,8 +493,9 @@ export default function Screen() {
                     <TH scope="col">Type</TH>
                     <TH scope="col">Uploaded</TH>
                     <TH scope="col">Status</TH>
-                    <TH scope="col" className="text-right">Chunks</TH>
-                    <TH scope="col" className="text-right">Actions</TH>
+                    <TH scope="col" className="text-right">
+                      Actions
+                    </TH>
                   </TR>
                 </THead>
                 <TBody>
@@ -642,14 +521,14 @@ export default function Screen() {
                         <TD className="text-xs uppercase" style={{ color: brand.neutralColor }}>
                           {doc.file_type}
                         </TD>
-                        <TD className="whitespace-nowrap text-xs" style={{ color: brand.neutralColor }}>
+                        <TD
+                          className="whitespace-nowrap text-xs"
+                          style={{ color: brand.neutralColor }}
+                        >
                           {formatStamp(doc.uploaded_at)}
                         </TD>
                         <TD>
                           <StatusChip status={doc.status} />
-                        </TD>
-                        <TD className="text-right text-xs tabular-nums" style={{ color: brand.neutralColor }}>
-                          {doc.status === "ready" ? doc.chunk_count : "—"}
                         </TD>
                         <TD className="text-right">
                           <div className="flex justify-end gap-1">
@@ -682,9 +561,12 @@ export default function Screen() {
                   })}
                 </TBody>
               </Table>
-              <p className="border-t border-slate-200 px-3 py-2 text-xs" style={{ color: brand.neutralColor }}>
-                Showing {visible.length} of {documents.length} documents. Documents that are processing or
-                failed are excluded from retrieval and are never cited.
+              <p
+                className="border-t border-slate-200 px-3 py-2 text-xs"
+                style={{ color: brand.neutralColor }}
+              >
+                Showing {visible.length} of {documents.length} documents. Documents that are
+                processing or failed are excluded from retrieval and are never cited.
               </p>
             </div>
           )}
@@ -699,10 +581,13 @@ export default function Screen() {
 
           {!selected ? (
             <div className="py-10 text-center">
-              <FileText className="mx-auto h-7 w-7" aria-hidden="true" style={{ color: brand.neutralColor }} />
+              <FileText
+                className="mx-auto h-7 w-7"
+                aria-hidden="true"
+                style={{ color: brand.neutralColor }}
+              />
               <p className="mt-2 text-sm" style={{ color: brand.neutralColor }}>
-                Select a document title from the list to see its ingestion status, storage key and
-                rename or delete it.
+                Select a document title from the list to see its status, rename or delete it.
               </p>
             </div>
           ) : (
@@ -724,14 +609,23 @@ export default function Screen() {
                     Sources in later answers will use this title.
                   </p>
                   {renameError ? (
-                    <p id="rename-error" role="alert" className="mt-1 text-xs font-medium" style={{ color: "#8C1D18" }}>
+                    <p
+                      id="rename-error"
+                      role="alert"
+                      className="mt-1 text-xs font-medium"
+                      style={{ color: "#8C1D18" }}
+                    >
                       {renameError}
                     </p>
                   ) : null}
                   <div className="mt-2 flex gap-2">
-                    <Button type="submit" style={{ backgroundColor: brand.primaryColor, color: "#FFFFFF" }}>
+                    <Button
+                      type="submit"
+                      disabled={renaming}
+                      style={{ backgroundColor: brand.primaryColor, color: "#FFFFFF" }}
+                    >
                       <Check className="mr-1 h-4 w-4" aria-hidden="true" />
-                      Save title
+                      {renaming ? "Saving…" : "Save title"}
                     </Button>
                     <Button
                       type="button"
@@ -769,10 +663,15 @@ export default function Screen() {
               {selected.status === "processing" ? (
                 <p
                   className="mt-3 rounded border p-2 text-xs leading-relaxed"
-                  style={{ backgroundColor: "rgba(227,181,5,0.14)", borderColor: "#D9C068", color: "#6B5200" }}
+                  style={{
+                    backgroundColor: "rgba(227,181,5,0.14)",
+                    borderColor: "#D9C068",
+                    color: "#6B5200",
+                  }}
                 >
                   Extracting text, chunking and embedding. This usually finishes within a couple of
-                  minutes — you can leave this page. Until it is ready, this document is not used as context.
+                  minutes — you can leave this page. Until it is ready, this document is not used
+                  as context.
                 </p>
               ) : null}
 
@@ -785,19 +684,9 @@ export default function Screen() {
                   <dt style={{ color: brand.neutralColor }}>Uploaded</dt>
                   <dd className="font-medium">{formatStamp(selected.uploaded_at)}</dd>
                 </div>
-                <div className="flex justify-between gap-3">
-                  <dt style={{ color: brand.neutralColor }}>Chunks indexed</dt>
-                  <dd className="font-medium tabular-nums">
-                    {selected.status === "ready" ? selected.chunk_count : "0"}
-                  </dd>
-                </div>
-                <div className="flex justify-between gap-3">
-                  <dt style={{ color: brand.neutralColor }}>Document ID</dt>
-                  <dd className="font-mono">{selected.id}</dd>
-                </div>
                 <div>
-                  <dt style={{ color: brand.neutralColor }}>Storage key</dt>
-                  <dd className="mt-0.5 break-all font-mono">{selected.storage_key}</dd>
+                  <dt style={{ color: brand.neutralColor }}>Document ID</dt>
+                  <dd className="mt-0.5 break-all font-mono">{selected.id}</dd>
                 </div>
               </dl>
 
@@ -808,17 +697,6 @@ export default function Screen() {
                   <Button type="button" onClick={startRename} className="w-full justify-center">
                     <Edit className="mr-1.5 h-4 w-4" aria-hidden="true" />
                     Rename document
-                  </Button>
-                ) : null}
-
-                {selected.status === "failed" ? (
-                  <Button
-                    type="button"
-                    onClick={() => retryIngestion(selected)}
-                    className="w-full justify-center"
-                  >
-                    <Upload className="mr-1.5 h-4 w-4" aria-hidden="true" />
-                    Retry ingestion
                   </Button>
                 ) : null}
 
@@ -860,8 +738,12 @@ export default function Screen() {
             style={{ borderRadius: brand.radius }}
           >
             <div className="flex items-start justify-between gap-3">
-              <h2 id="delete-title" className="text-base font-semibold" style={{ color: brand.primaryColor }}>
-                Delete “{deleteTarget.title}”?
+              <h2
+                id="delete-title"
+                className="text-base font-semibold"
+                style={{ color: brand.primaryColor }}
+              >
+                Delete "{deleteTarget.title}"?
               </h2>
               <button
                 type="button"
@@ -873,29 +755,36 @@ export default function Screen() {
                 <X className="h-4 w-4" aria-hidden="true" />
               </button>
             </div>
-            <p id="delete-desc" className="mt-2 text-sm leading-relaxed" style={{ color: brand.neutralColor }}>
-              This removes the document record, the stored original file and all{" "}
-              <strong className="font-semibold" style={{ color: "#1B2430" }}>
-                {deleteTarget.chunk_count} chunks
-              </strong>{" "}
-              from your search index, so this material can never be retrieved or cited again. Past
-              conversations that cited it will say the source is no longer available.{" "}
+            <p
+              id="delete-desc"
+              className="mt-2 text-sm leading-relaxed"
+              style={{ color: brand.neutralColor }}
+            >
+              This removes the document record, the stored original file and all of its indexed
+              content, so this material can never be retrieved or cited again. Past conversations
+              that cited it will say the source is no longer available.{" "}
               <strong className="font-semibold" style={{ color: "#1B2430" }}>
                 This action cannot be undone.
               </strong>
             </p>
+            {deleteError ? (
+              <p role="alert" className="mt-2 text-sm font-medium" style={{ color: "#8C1D18" }}>
+                {deleteError}
+              </p>
+            ) : null}
             <div className="mt-4 flex justify-end gap-2">
-              <Button type="button" onClick={closeDialog}>
+              <Button type="button" onClick={closeDialog} disabled={deleting}>
                 Cancel
               </Button>
               <button
                 type="button"
                 ref={confirmRef}
-                onClick={confirmDelete}
-                className="rounded-md px-3 py-1.5 text-sm font-medium text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+                className="rounded-md px-3 py-1.5 text-sm font-medium text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-60"
                 style={{ backgroundColor: "#8C1D18", borderRadius: brand.radius }}
               >
-                Delete permanently
+                {deleting ? "Deleting…" : "Delete permanently"}
               </button>
             </div>
           </div>
@@ -904,5 +793,3 @@ export default function Screen() {
     </div>
   );
 }
-
-const { Check } = Icons;

@@ -104,3 +104,48 @@ export function confirmPasswordReset(token: string, newPassword: string): Promis
     body: JSON.stringify({ token, new_password: newPassword }),
   });
 }
+
+// -------------------------------------------------------------- library --
+
+/** Mirrors `app.schemas.DocumentOut`. `status` is server-owned: the backend
+ * is free to introduce values beyond these three, so the screen renders
+ * whatever string it gets back rather than asserting a closed set. */
+export type DocumentStatus = "processing" | "ready" | "failed";
+
+export type DocumentOut = {
+  id: string;
+  title: string;
+  file_type: string;
+  status: DocumentStatus;
+  failure_reason: string | null;
+  uploaded_at: string;
+};
+
+export type DocumentListResponse = { documents: DocumentOut[] };
+
+/** Mirrors `app.schemas.UsageResponse` (GET /me/usage). */
+export type UsageResponse = {
+  document_count: number;
+  documents_cap: number;
+  remaining_questions: number;
+  reset_date: string;
+};
+
+export function listDocuments(): Promise<DocumentListResponse> {
+  return apiFetch<DocumentListResponse>("/documents");
+}
+
+export function renameDocument(id: string, title: string): Promise<DocumentOut> {
+  return apiFetch<DocumentOut>(`/documents/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteDocument(id: string): Promise<void> {
+  return apiFetch<void>(`/documents/${id}`, { method: "DELETE" });
+}
+
+export function getUsage(): Promise<UsageResponse> {
+  return apiFetch<UsageResponse>("/me/usage");
+}
