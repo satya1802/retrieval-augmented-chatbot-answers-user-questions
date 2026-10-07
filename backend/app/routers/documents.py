@@ -145,9 +145,7 @@ async def rename_document(
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_document(
-    document_id: uuid.UUID, user_id: _CurrentUserId, db: _DbSession
-) -> None:
+async def delete_document(document_id: uuid.UUID, user_id: _CurrentUserId, db: _DbSession) -> None:
     """AC-031, AC-008: delete the document, its original file and all
     chunks/vectors (cascade); 404 if the caller does not own `document_id`."""
     doc = get_owned_or_404(db, Document, document_id, user_id, detail="document not found")

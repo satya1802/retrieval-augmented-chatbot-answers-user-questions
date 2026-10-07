@@ -48,7 +48,9 @@ async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONR
     headers = dict(exc.headers) if exc.headers else {}
     if exc.status_code == status.HTTP_401_UNAUTHORIZED:
         headers.setdefault("WWW-Authenticate", "Bearer")
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=headers)
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": exc.detail}, headers=headers
+    )
 
 
 # The scaffold ships no migrations, so the tables are created from the models on

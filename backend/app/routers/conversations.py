@@ -39,9 +39,7 @@ _DbSession = Annotated[Session, Depends(get_db)]
 
 
 @router.get("", response_model=ConversationListResponse)
-async def list_conversations(
-    user_id: _CurrentUserId, db: _DbSession
-) -> ConversationListResponse:
+async def list_conversations(user_id: _CurrentUserId, db: _DbSession) -> ConversationListResponse:
     """AC-073, AC-075: only the caller's own conversations, filtered by
     owner_id at the query level, not after serialisation."""
     conversations = (
@@ -60,7 +58,9 @@ async def create_conversation(
     body: ConversationCreateRequest, user_id: _CurrentUserId, db: _DbSession
 ) -> ConversationCreateResponse:
     """AC-039, AC-076: optional document scope at creation time."""
-    scope_ids = [str(doc_id) for doc_id in body.scope_document_ids] if body.scope_document_ids else []
+    scope_ids = (
+        [str(doc_id) for doc_id in body.scope_document_ids] if body.scope_document_ids else []
+    )
     conversation = Conversation(owner_id=user_id, title=body.title, scope_document_ids=scope_ids)
     db.add(conversation)
     db.commit()
