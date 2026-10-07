@@ -4,6 +4,31 @@ sqlalchemy==2.0.35
 pydantic==2.9.2
 psycopg[binary]==3.2.3
 
+# pydantic's EmailStr (used on the auth request schemas) validates with this
+# at import time; without it, importing app.schemas raises ImportError.
+email-validator>=2.2
+
+# The POST /documents endpoint accepts a multipart file upload; FastAPI only
+# parses multipart/form-data when python-multipart is installed.
+python-multipart>=0.0.12
+
+# Auth mechanism the architecture names: JWT bearer tokens (see app/security.py)
+# and password hashing for the `users.password_hash` column.
+pyjwt>=2.9
+passlib[bcrypt]>=1.7
+
+# object_store (AWS S3) and queue (AWS SQS) from the approved architecture.
+boto3>=1.35
+
+# ai_provider: commercial embedding + chat LLM behind an OpenAI-compatible API.
+openai>=1.50
+
+# chunks.embedding is `vector(1536)` in the approved data model. Used only
+# when DATABASE_URL points at Postgres; app/models.py falls back to a JSON
+# column for the SQLite dev database so the schema still creates without a
+# pgvector-enabled server (see app/models.py Embedding type).
+pgvector>=0.3
+
 # Checks. The platform installs and runs this file before it reports that the
 # generated tests pass, so the test dependencies belong here rather than in a
 # second file nobody installs. httpx is what fastapi.testclient runs on.

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import models  # noqa: F401 -- imported so the tables register before create_all
 from app.database import Base, engine
+from app.routers import auth, chunks, conversations, documents, me
 
 app = FastAPI(
     title="Retrieval-augmented chatbot answers user questions",
@@ -40,6 +41,15 @@ app.add_middleware(
 # The scaffold ships no migrations, so the tables are created from the models on
 # startup. Replace this with Alembic before anything holds data worth keeping.
 Base.metadata.create_all(bind=engine)
+
+# Auth is unauthenticated by spec; every other router's routes depend on
+# app.security.get_current_user_id and answer 401 before a handler runs
+# (AC-010). See each module in app/routers for the endpoints it owns.
+app.include_router(auth.router)
+app.include_router(me.router)
+app.include_router(documents.router)
+app.include_router(conversations.router)
+app.include_router(chunks.router)
 
 
 @app.get("/health")

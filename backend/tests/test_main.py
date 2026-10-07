@@ -1,0 +1,78 @@
+"""Toolchain-level tests: the app starts, routes exist and auth is wired.
+
+These do not test feature behaviour -- there isn't any yet. They prove the
+scaffold a development ticket inherits actually works: the OpenAPI app
+boots, every spec'd route resolves instead of 404ing, and a protected route
+rejects a missing or bad token before reaching its (still-stub) handler.
+"""
+
+from app.security import create_access_token
+
+
+def test_health_ok(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_protected_route_without_token_is_401(client):
+    resp = client.get("/me/usage")
+    assert resp.status_code == 401
+
+
+def test_protected_route_with_garbage_token_is_401(client):
+    resp = client.get("/me/usage", headers={"Authorization": "Bearer not-a-real-token"})
+    assert resp.status_code == 401
+
+
+def test_protected_route_with_valid_token_reaches_the_stub(client):
+    token = create_access_token(subject="11111111-1111-1111-1111-111111111111")
+    resp = client.get("/me/usage", headers={"Authorization": f"Bearer {token}"})
+    # Authenticated, so it gets past app.security and hits the not-yet-built
+    # handler -- 501, not 401.
+    assert resp.status_code == 501
+
+
+def test_documents_list_requires_auth(client):
+    assert client.get("/documents").status_code == 401
+
+
+def test_conversations_list_requires_auth(client):
+    assert client.get("/conversations").status_code == 401
+
+
+def test_chunks_lookup_requires_auth(client):
+    resp = client.get("/chunks/11111111-1111-1111-1111-111111111111")
+    assert resp.status_code == 401
+
+
+def test_auth_routes_need_no_token_and_are_wired_but_unimplemented(client):
+    resp = client.post("/auth/register", json={"email": "a@example.com", "password": "x"})
+    assert resp.status_code == 501
+
+
+def test_auth_login_validates_its_request_body(client):
+    # Malformed email never reaches the stub -- Pydantic rejects it first.
+    resp = client.post("/auth/login", json={"email": "not-an-email", "password": "x"})
+    assert resp.status_code == 422
+
+
+def test_openapi_document_serves(client):
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    paths = resp.json()["paths"]
+    for path in (
+        "/auth/register",
+        "/auth/verify",
+        "/auth/login",
+        "/auth/password-reset/request",
+        "/auth/password-reset/confirm",
+        "/me/usage",
+        "/documents",
+        "/documents/{document_id}",
+        "/conversations",
+        "/conversations/{conversation_id}",
+        "/conversations/{conversation_id}/messages",
+        "/chunks/{chunk_id}",
+    ):
+        assert path in paths, f"{path} missing from the generated OpenAPI document"
