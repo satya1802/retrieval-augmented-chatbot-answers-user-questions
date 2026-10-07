@@ -69,9 +69,7 @@ function streamResponse(reader: ReturnType<typeof createControllableReader>) {
   } as unknown as Response);
 }
 
-function mockFetchRouter(
-  handlers: Record<string, (init?: RequestInit) => Promise<Response>>,
-) {
+function mockFetchRouter(handlers: Record<string, (init?: RequestInit) => Promise<Response>>) {
   return vi.fn((url: string, init?: RequestInit) => {
     const path = url.replace("http://localhost:8000", "");
     const reqMethod = init?.method ?? "GET";
@@ -206,9 +204,7 @@ describe("Chat screen -- streaming ask (US-020-2)", () => {
     );
     secondCallReader!.end();
 
-    expect(
-      await screen.findByText("The notice period is thirty days."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("The notice period is thirty days.")).toBeInTheDocument();
 
     // the request body of the retried call carried the same question text.
     const calls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls as FetchCall[];

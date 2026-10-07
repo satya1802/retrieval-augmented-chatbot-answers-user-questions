@@ -311,8 +311,7 @@ export default function Screen() {
       let draftContent = "";
       let gotAnyDelta = false;
 
-      const clearStreaming = () =>
-        setStreamingId((prev) => (prev === draftId ? null : prev));
+      const clearStreaming = () => setStreamingId((prev) => (prev === draftId ? null : prev));
 
       const handleCutShort = () => {
         if (!gotAnyDelta) {
@@ -545,10 +544,7 @@ export default function Screen() {
                               // control that re-asks the same question.
                               <div className="mt-2 flex flex-wrap items-center gap-2">
                                 <Badge variant="warning">Incomplete</Badge>
-                                <span
-                                  className="text-xs"
-                                  style={{ color: brand.neutralColor }}
-                                >
+                                <span className="text-xs" style={{ color: brand.neutralColor }}>
                                   The connection ended before the answer finished.
                                 </span>
                                 <Button
