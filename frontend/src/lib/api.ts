@@ -149,3 +149,89 @@ export function deleteDocument(id: string): Promise<void> {
 export function getUsage(): Promise<UsageResponse> {
   return apiFetch<UsageResponse>("/me/usage");
 }
+
+// --------------------------------------------------------- conversations --
+
+/** Mirrors `app.schemas.ConversationOut`. An empty `scope_document_ids`
+ * means "all of the caller's ready documents" (AC-039, AC-040) -- the
+ * backend never materialises the full id list for that case. */
+export type ConversationOut = {
+  id: string;
+  title: string | null;
+  scope_document_ids: string[];
+  created_at: string;
+};
+
+export type ConversationListResponse = { conversations: ConversationOut[] };
+
+export type ConversationCreateRequest = {
+  title?: string | null;
+  scope_document_ids?: string[] | null;
+};
+
+export type ConversationCreateResponse = { conversation: ConversationOut };
+
+/** Mirrors `app.schemas.CitationOut`. `chunk_id` is null when the source
+ * document was deleted after the citation was recorded -- there is no
+ * chunk left to fetch, so callers should not attempt `getChunk` for it. */
+export type CitationOut = {
+  chunk_id: string | null;
+  document_title_snapshot: string;
+  chunk_position: number;
+};
+
+export type MessageOut = {
+  id: string;
+  role: string;
+  content: string;
+  is_incomplete: boolean;
+  created_at: string;
+  citations: CitationOut[];
+};
+
+export type ConversationDetailResponse = {
+  conversation: ConversationOut;
+  messages: MessageOut[];
+};
+
+export type AskQuestionResponse = {
+  message: MessageOut;
+  citations: CitationOut[];
+};
+
+export type ChunkDetailResponse = {
+  text: string;
+  document_title: string;
+  position: number;
+};
+
+export function listConversations(): Promise<ConversationListResponse> {
+  return apiFetch<ConversationListResponse>("/conversations");
+}
+
+export function createConversation(
+  body: ConversationCreateRequest,
+): Promise<ConversationCreateResponse> {
+  return apiFetch<ConversationCreateResponse>("/conversations", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function getConversation(id: string): Promise<ConversationDetailResponse> {
+  return apiFetch<ConversationDetailResponse>(`/conversations/${id}`);
+}
+
+export function askQuestion(
+  conversationId: string,
+  question: string,
+): Promise<AskQuestionResponse> {
+  return apiFetch<AskQuestionResponse>(`/conversations/${conversationId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
+}
+
+export function getChunk(chunkId: string): Promise<ChunkDetailResponse> {
+  return apiFetch<ChunkDetailResponse>(`/chunks/${chunkId}`);
+}

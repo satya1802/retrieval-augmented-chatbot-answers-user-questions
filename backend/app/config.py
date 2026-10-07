@@ -27,3 +27,9 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 EMBEDDING_MODEL = os.getenv("AI_PROVIDER_EMBEDDING_MODEL", "text-embedding-3-small")
 AI_PROVIDER_API_KEY = os.getenv("AI_PROVIDER_API_KEY", "")
 AI_PROVIDER_BASE_URL = os.getenv("AI_PROVIDER_BASE_URL") or None
+
+# Retrieval (see app/services/retrieval.py): the fixed number of the
+# caller's highest-scoring ready chunks returned as answer context per
+# question (AC-035, AC-037). One constant so a test or deployment overrides
+# a single value rather than a limit baked into each call site.
+RETRIEVAL_TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "5"))
