@@ -6,10 +6,12 @@ that is not owned, or not yet ready, is rejected with 422 rather than
 silently dropped or silently accepted. `POST /{id}/messages` retrieves
 context chunks via `retrieve_context` -- scoped to that conversation, or
 with no scope set, to all of the caller's ready documents (AC-040) -- and
-passes only those chunks to the hosted generation provider (US-014-1): a
-grounded response with citations, the exact insufficient-context string, or
-a 502 error when the provider itself fails. It never invents an answer and
-never falls back to documents outside the scope.
+passes only those chunks to the hosted generation provider (US-014-1,
+extended for derived outputs and safety-sensitive requests by US-018-1): a
+grounded response with citations, the exact insufficient-context string, a
+refusal with no citations, or a 502 error when the provider itself fails.
+It never invents an answer and never falls back to documents outside the
+scope.
 """
 
 import uuid
@@ -35,7 +37,7 @@ from app.schemas import (
 )
 from app.security import get_current_user_id
 from app.services import usage_service
-from app.services.generation_client import GenerationError, get_generation_client
+from app.services.generation_client import GenerationError, REFUSAL_MESSAGE, get_generation_client
 from app.services.retrieval import READY_STATUS, ContextChunk, retrieve_context
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -62,6 +64,12 @@ _GENERATION_FAILURE_DETAIL = (
 )
 
 _SCOPE_VALIDATION_DETAIL = "scope_document_ids must reference the caller's own ready documents"
+
+# AC-065: no citations are attached to a refusal (reveal-system-prompt /
+# hidden-instructions / chain-of-thought request) any more than to the
+# insufficient-context sentence -- both are "the model did not answer from
+# the context", so neither carries a citation list.
+_UNCITED_ANSWERS = frozenset({INSUFFICIENT_CONTEXT_MESSAGE, REFUSAL_MESSAGE})
 
 
 @router.get("", response_model=ConversationListResponse)
@@ -150,25 +158,30 @@ async def ask_question(
     db: _DbSession,
 ) -> AskQuestionResponse:
     """AC-039, AC-040, AC-041, AC-038, AC-032, AC-012, AC-009, AC-045
-    through AC-051: ownership and the monthly question cap are both
-    enforced before anything else runs, including before any
-    embedding/retrieval/generation call (AC-012). Retrieval is then scoped
-    to exactly `conversation.scope_document_ids` when a scope is set
-    (AC-039) -- so chunks from an unselected document are never in the
-    context set -- or to all of the caller's ready documents when no scope
-    is set (AC-040).
+    through AC-051, AC-059 through AC-066: ownership and the monthly
+    question cap are both enforced before anything else runs, including
+    before any embedding/retrieval/generation call (AC-012). Retrieval is
+    then scoped to exactly `conversation.scope_document_ids` when a scope
+    is set (AC-039) -- so chunks from an unselected document are never in
+    the context set -- or to all of the caller's ready documents when no
+    scope is set (AC-040).
 
     A caller with no ready documents at all in the relevant scope never
     reaches retrieval -- let alone an embedding or generation provider call
     -- and instead gets a response stating the library is empty or still
     processing (AC-038). When retrieval returns chunks, those chunks --
     and only those chunks -- are passed to the hosted generation provider
-    (AC-045); its answer is used verbatim unless it is exactly the
-    insufficient-context sentence, in which case no citations are attached
-    (AC-050). The assistant message and its citations are only persisted
-    after a successful generation call: a provider failure or timeout
-    raises a 502 instead, with no assistant message, partial or otherwise,
-    stored (AC-048).
+    (AC-045), whose instructions (`SYSTEM_PROMPT`) also cover derived
+    outputs -- summaries, steps, recommendations, comparisons -- and
+    safety-sensitive requests -- ambiguity, verbatim quoting, system-prompt
+    disclosure, out-of-scope questions -- with the same context-only
+    grounding and traceability as a direct answer. Its answer is used
+    verbatim unless it is exactly the insufficient-context sentence or the
+    system-prompt-disclosure refusal, in which case no citations are
+    attached (AC-050, AC-065). The assistant message and its citations are
+    only persisted after a successful generation call: a provider failure
+    or timeout raises a 502 instead, with no assistant message, partial or
+    otherwise, stored (AC-048).
     """
     conversation = get_owned_or_404(
         db, Conversation, conversation_id, user_id, detail="conversation not found"
@@ -212,9 +225,11 @@ async def ask_question(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=_GENERATION_FAILURE_DETAIL,
                 ) from exc
-            # AC-050: no sources attached to a response the provider itself
-            # judged unsupported by the retrieved context.
-            if content.strip() != INSUFFICIENT_CONTEXT_MESSAGE:
+            # AC-050, AC-065: no sources attached to a response the
+            # provider itself judged unsupported by the retrieved context,
+            # nor to a refusal to disclose the system prompt / hidden
+            # instructions / chain-of-thought.
+            if content.strip() not in _UNCITED_ANSWERS:
                 citation_chunks = retrieved
 
     assistant_message = Message(
