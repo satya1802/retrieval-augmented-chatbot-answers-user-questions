@@ -8,8 +8,9 @@ OpenAPI document and passes its tests before a single handler is implemented.
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import models  # noqa: F401 -- imported so the tables register before create_all
 from app.database import Base, engine
@@ -37,6 +38,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Every 401 anywhere in the app -- missing, expired or tampered JWT,
+    from any router -- carries a WWW-Authenticate header (AC-010), without
+    every router or app.security having to set it itself."""
+    headers = dict(exc.headers) if exc.headers else {}
+    if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+        headers.setdefault("WWW-Authenticate", "Bearer")
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=headers)
+
 
 # The scaffold ships no migrations, so the tables are created from the models on
 # startup. Replace this with Alembic before anything holds data worth keeping.

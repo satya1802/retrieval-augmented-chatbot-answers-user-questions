@@ -1,7 +1,8 @@
 """Document library CRUD and upload.
 
 Every owned-resource lookup here must filter by the caller's id and return
-404 on a mismatch, per the architecture note.
+404 on a mismatch, per the architecture note; `app.dependencies.get_owned_or_404`
+is the single helper that does it.
 """
 
 import uuid
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import DOCUMENTS_CAP
 from app.database import get_db
+from app.dependencies import get_owned_or_404
 from app.models import Document
 from app.schemas import (
     DocumentCreateResponse,
@@ -22,11 +24,13 @@ from app.schemas import (
 )
 from app.security import get_current_user_id
 from app.services import storage
-from app.services.document_service import SUPPORTED_TYPES_MESSAGE, UnsupportedFileType, sniff_file_type
+from app.services.document_service import (
+    SUPPORTED_TYPES_MESSAGE,
+    UnsupportedFileType,
+    sniff_file_type,
+)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-
-_NOT_IMPLEMENTED = "Not implemented yet -- stub endpoint for the development sprint."
 
 _CurrentUserId = Annotated[uuid.UUID, Depends(get_current_user_id)]
 _DbSession = Annotated[Session, Depends(get_db)]
@@ -97,7 +101,8 @@ async def upload_document(
 
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(user_id: _CurrentUserId, db: _DbSession) -> DocumentListResponse:
-    """AC-025, AC-027: only the caller's own documents."""
+    """AC-025, AC-027: only the caller's own documents, filtered by owner_id
+    at the query level, not after serialisation."""
     docs = (
         db.query(Document)
         .filter(Document.owner_id == user_id)
@@ -108,15 +113,11 @@ async def list_documents(user_id: _CurrentUserId, db: _DbSession) -> DocumentLis
 
 
 @router.get("/{document_id}", response_model=DocumentOut)
-async def get_document(document_id: uuid.UUID, user_id: _CurrentUserId, db: _DbSession) -> DocumentOut:
+async def get_document(
+    document_id: uuid.UUID, user_id: _CurrentUserId, db: _DbSession
+) -> DocumentOut:
     """AC-008: 404 if the caller does not own `document_id`."""
-    doc = (
-        db.query(Document)
-        .filter(Document.id == document_id, Document.owner_id == user_id)
-        .first()
-    )
-    if doc is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+    doc = get_owned_or_404(db, Document, document_id, user_id, detail="document not found")
     return DocumentOut.model_validate(doc)
 
 
@@ -125,12 +126,32 @@ async def rename_document(
     document_id: uuid.UUID,
     body: DocumentRenameRequest,
     user_id: _CurrentUserId,
+    db: _DbSession,
 ) -> DocumentOut:
-    """AC-028, AC-030: reject an empty/whitespace title."""
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=_NOT_IMPLEMENTED)
+    """AC-028, AC-030, AC-008: reject an empty/whitespace title; 404 if the
+    caller does not own `document_id`."""
+    doc = get_owned_or_404(db, Document, document_id, user_id, detail="document not found")
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="title must not be empty",
+        )
+    doc.title = title
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return DocumentOut.model_validate(doc)
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_document(document_id: uuid.UUID, user_id: _CurrentUserId) -> None:
-    """AC-031: delete the document, its original file and all chunks/vectors."""
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=_NOT_IMPLEMENTED)
+async def delete_document(
+    document_id: uuid.UUID, user_id: _CurrentUserId, db: _DbSession
+) -> None:
+    """AC-031, AC-008: delete the document, its original file and all
+    chunks/vectors (cascade); 404 if the caller does not own `document_id`."""
+    doc = get_owned_or_404(db, Document, document_id, user_id, detail="document not found")
+    if doc.storage_key:
+        storage.delete_original(doc.storage_key)
+    db.delete(doc)
+    db.commit()
