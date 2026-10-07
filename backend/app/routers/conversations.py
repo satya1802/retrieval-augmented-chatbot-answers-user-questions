@@ -3,10 +3,11 @@
 `POST /{id}/messages` is specified as a streamed `text/event-stream` response
 (tokens, then a final `{message, citations}` payload) once retrieval and
 generation exist. That pipeline is not built this sprint, but the handler
-still verifies ownership of the conversation and constructs the owner-scoped
-chunk-retrieval query (AC-009) before answering the same 501 every other stub
-in this file does -- the route, its auth, its ownership check and its
-request schema are already correct for the handler that replaces this body.
+still verifies ownership of the conversation, enforces the monthly question
+cap (AC-012) and constructs the owner-scoped chunk-retrieval query (AC-009)
+before answering the same 501 every other stub in this file does -- the
+route, its auth, its ownership check, its cap enforcement and its request
+schema are already correct for the handler that replaces this body.
 """
 
 import uuid
@@ -15,9 +16,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.config import MONTHLY_QUESTION_CAP
 from app.database import get_db
 from app.dependencies import get_owned_or_404
-from app.models import Conversation
+from app.models import Conversation, User
 from app.schemas import (
     AskQuestionRequest,
     ConversationCreateRequest,
@@ -28,6 +30,7 @@ from app.schemas import (
     MessageOut,
 )
 from app.security import get_current_user_id
+from app.services import usage_service
 from app.services.retrieval import build_context_chunk_query
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -95,13 +98,27 @@ async def ask_question(
     retrieve top-k chunks scoped to the caller and stream a grounded
     Answer/Sources or the exact insufficient-context string.
 
-    Ownership of the conversation is checked first, and the context-chunk
-    query is built with the same owner_id predicate the retrieval pipeline
-    will use once it exists, so later work inherits the isolation rather
-    than having to add it."""
+    Ownership of the conversation is checked first. The monthly question
+    cap (app.services.usage_service) is then enforced -- rolling the window
+    over if it has expired, and refusing with 409 naming the limit and
+    reset date if it is already spent -- before retrieval or any
+    embedding/LLM provider call runs (AC-012). `MONTHLY_QUESTION_CAP` is
+    passed in explicitly, the same way the document cap is, so this
+    module's constant (not one read inside the service) is the single
+    source of truth a caller or test would override. A question that
+    clears the cap is counted immediately, since the generation pipeline
+    that would otherwise mark it "successful" is not built this sprint; the
+    context-chunk query is built with the same owner_id predicate the
+    retrieval pipeline will use once it exists, so later work inherits the
+    isolation rather than having to add it."""
     conversation = get_owned_or_404(
         db, Conversation, conversation_id, user_id, detail="conversation not found"
     )
+
+    user = db.get(User, user_id)
+    usage_service.enforce_question_capacity(db, user, cap=MONTHLY_QUESTION_CAP)
+    usage_service.increment_question_count(db, user)
+
     document_ids = (
         [uuid.UUID(doc_id) for doc_id in conversation.scope_document_ids]
         if conversation.scope_document_ids

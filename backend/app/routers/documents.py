@@ -31,7 +31,7 @@ from app.schemas import (
     RejectedFileOut,
 )
 from app.security import get_current_user_id
-from app.services import storage
+from app.services import storage, usage_service
 from app.services.document_service import (
     SUPPORTED_TYPES_MESSAGE,
     UnsupportedFileType,
@@ -54,7 +54,12 @@ async def upload_document(
 ) -> DocumentCreateResponse:
     """AC-014, AC-015, AC-016, AC-017: file upload only (no URL source);
     sniff each file's real content; one bad file in a multi-file upload does
-    not block the others; enforce the single configurable document cap.
+    not block the others; enforce the single configurable document cap
+    (AC-011), via app.services.usage_service so the cap arithmetic lives in
+    one place shared with the question-cap check. `DOCUMENTS_CAP` is passed
+    in explicitly (rather than read inside the service) so this module's
+    own constant remains the one a test or future per-request override
+    would patch.
 
     AC-018, AC-021: each accepted file is enqueued for out-of-request
     ingestion (extract, chunk, embed, persist) so the response returns 202
@@ -84,12 +89,9 @@ async def upload_document(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=SUPPORTED_TYPES_MESSAGE
         )
 
-    current_count = db.query(Document).filter(Document.owner_id == user_id).count()
-    if current_count + len(sniffed) > DOCUMENTS_CAP:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Document cap of {DOCUMENTS_CAP} reached.",
-        )
+    usage_service.check_document_capacity(
+        db, user_id, additional=len(sniffed), cap=DOCUMENTS_CAP
+    )
 
     created: list[Document] = []
     for filename, file_type, content in sniffed:
