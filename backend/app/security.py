@@ -14,6 +14,7 @@ once, rather than copied into every router.
 import os
 import time
 import uuid
+from typing import Annotated
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -27,6 +28,10 @@ DEFAULT_TOKEN_LIFETIME_SECONDS = 60 * 60 * 24
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
+_BearerCredentials = Annotated[
+    HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+]
+
 
 def create_access_token(
     subject: str, expires_in_seconds: int = DEFAULT_TOKEN_LIFETIME_SECONDS
@@ -37,9 +42,7 @@ def create_access_token(
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-) -> uuid.UUID:
+def get_current_user_id(credentials: _BearerCredentials) -> uuid.UUID:
     """Decode the bearer token and return the caller's user id, or raise 401.
 
     Every owned-resource lookup downstream still has to filter by this id and

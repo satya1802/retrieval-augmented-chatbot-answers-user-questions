@@ -8,6 +8,7 @@ schema are already correct for the handler that replaces this body.
 """
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -24,18 +25,18 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 _NOT_IMPLEMENTED = "Not implemented yet -- stub endpoint for the development sprint."
 
+_CurrentUserId = Annotated[uuid.UUID, Depends(get_current_user_id)]
+
 
 @router.get("", response_model=ConversationListResponse)
-async def list_conversations(
-    user_id: uuid.UUID = Depends(get_current_user_id),
-) -> ConversationListResponse:
+async def list_conversations(user_id: _CurrentUserId) -> ConversationListResponse:
     """AC-073, AC-075: only the caller's own conversations."""
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=_NOT_IMPLEMENTED)
 
 
 @router.post("", response_model=ConversationCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_conversation(
-    body: ConversationCreateRequest, user_id: uuid.UUID = Depends(get_current_user_id)
+    body: ConversationCreateRequest, user_id: _CurrentUserId
 ) -> ConversationCreateResponse:
     """AC-039, AC-076: optional document scope at creation time."""
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=_NOT_IMPLEMENTED)
@@ -43,7 +44,7 @@ async def create_conversation(
 
 @router.get("/{conversation_id}", response_model=ConversationDetailResponse)
 async def get_conversation(
-    conversation_id: uuid.UUID, user_id: uuid.UUID = Depends(get_current_user_id)
+    conversation_id: uuid.UUID, user_id: _CurrentUserId
 ) -> ConversationDetailResponse:
     """AC-073: owned conversation with its messages, answers and citations."""
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=_NOT_IMPLEMENTED)
@@ -53,7 +54,7 @@ async def get_conversation(
 async def ask_question(
     conversation_id: uuid.UUID,
     body: AskQuestionRequest,
-    user_id: uuid.UUID = Depends(get_current_user_id),
+    user_id: _CurrentUserId,
 ):
     """AC-035, AC-049, AC-052, AC-067, AC-068, AC-069, AC-012: enforce the
     question cap, reject empty questions, rewrite follow-ups, retrieve top-k
