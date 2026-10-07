@@ -27,6 +27,12 @@ async def get_usage(user_id: _CurrentUserId, db: _DbSession) -> UsageResponse:
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
 
+    # Mirrors the rollover `enforce_question_capacity` performs before a
+    # question is asked, so a usage check between two questions never
+    # reports a stale count from an already-elapsed window, nor a
+    # reset_date that has already passed.
+    usage_service.ensure_question_window_current(db, user)
+
     document_count = db.query(Document).filter(Document.owner_id == user_id).count()
     remaining_questions = max(0, MONTHLY_QUESTION_CAP - user.monthly_question_count)
     reset_date = usage_service.question_reset_date(user)

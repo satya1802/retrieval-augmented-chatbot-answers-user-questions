@@ -353,10 +353,13 @@ async def ask_question(
     byte-compatibly. The assistant message and its citations are only
     persisted after a successful generation call in the non-streaming
     path -- a provider failure or timeout raises a 502 instead, with no
-    assistant message, partial or otherwise, stored (AC-048). In the
-    streaming path a provider failure mid-answer instead persists the
-    partial text already emitted, flagged `is_incomplete=True`, and
-    terminates the stream with an `error` event (AC-070).
+    assistant message, partial or otherwise, stored (AC-048), and the
+    question already counted against the caller's monthly cap below is
+    refunded, since no answer was ever produced for it. In the streaming
+    path a provider failure mid-answer instead persists the partial text
+    already emitted, flagged `is_incomplete=True`, and terminates the
+    stream with an `error` event (AC-070) -- that turn did produce and
+    store something, so its question is not refunded.
     """
     conversation = get_owned_or_404(
         db, Conversation, conversation_id, user_id, detail="conversation not found"
@@ -419,6 +422,12 @@ async def ask_question(
         try:
             content = get_generation_client().generate(body.question, context_text)
         except GenerationError as exc:
+            # AC-012, AC-048: no answer was produced and no assistant
+            # message will be stored for this turn -- refund the question
+            # `usage_service.increment_question_count` already counted
+            # above, so a transient provider failure does not silently
+            # cost the caller a real question.
+            usage_service.decrement_question_count(db, user)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=_GENERATION_FAILURE_DETAIL,

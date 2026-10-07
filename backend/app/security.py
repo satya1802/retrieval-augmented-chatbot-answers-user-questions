@@ -97,3 +97,13 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, password_hash: str) -> bool:
     return _pwd_context.verify(password, password_hash)
+
+
+# A fixed hash, tied to no real account, computed once at import. The
+# /auth/login handler verifies against this when no user row matches the
+# submitted email, so that lookup still spends roughly the same
+# bcrypt-bound time a real check would -- rather than returning
+# near-instantly and letting response latency (not just the generic error
+# body) distinguish "no such account" from "wrong password" for an
+# otherwise-identical 401 (AC-005, AC-006).
+UNKNOWN_USER_PASSWORD_HASH = hash_password("no-such-account-placeholder-password")

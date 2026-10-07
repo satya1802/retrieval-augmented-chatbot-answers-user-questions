@@ -4,6 +4,9 @@ Both the document-upload cap (app.routers.documents) and the monthly
 question cap (app.routers.conversations) read their limits from
 app.config and do their arithmetic here, once, so neither router repeats
 "count rows, compare to a config constant, raise 409" in its own words.
+`GET /me/usage` (app.routers.me) also shares the window-rollover logic here,
+so it never reports a stale count or an already-past reset date between two
+questions.
 """
 
 from datetime import date, timedelta
@@ -51,6 +54,20 @@ def _roll_window_if_expired(user: User) -> bool:
     return False
 
 
+def ensure_question_window_current(db: Session, user: User) -> None:
+    """Roll the monthly window over -- persisting the reset immediately --
+    if it has expired. Shared by `enforce_question_capacity` (called before
+    a question is asked) and `GET /me/usage` (called before usage is
+    reported): without this, a caller who checks `/me/usage` after their
+    window has elapsed but before asking a new question would see the old
+    window's stale count and a `reset_date` already in the past, instead of
+    the rolled-over state the next question would actually enforce.
+    """
+    if _roll_window_if_expired(user):
+        db.add(user)
+        db.commit()
+
+
 def enforce_question_capacity(db: Session, user: User, cap: int = MONTHLY_QUESTION_CAP) -> None:
     """Roll the monthly window over if it has expired, then refuse the
     question with 409 -- naming the monthly limit and the date it resets --
@@ -60,10 +77,8 @@ def enforce_question_capacity(db: Session, user: User, cap: int = MONTHLY_QUESTI
     Called, and must complete, before retrieval or any embedding/LLM
     provider call runs.
     """
-    rolled_over = _roll_window_if_expired(user)
+    ensure_question_window_current(db, user)
     if user.monthly_question_count >= cap:
-        db.add(user)
-        db.commit()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -71,13 +86,25 @@ def enforce_question_capacity(db: Session, user: User, cap: int = MONTHLY_QUESTI
                 f"Resets on {question_reset_date(user).isoformat()}."
             ),
         )
-    if rolled_over:
-        db.add(user)
-        db.commit()
 
 
 def increment_question_count(db: Session, user: User) -> None:
     """Record a successful question against the caller's monthly count."""
     user.monthly_question_count += 1
+    db.add(user)
+    db.commit()
+
+
+def decrement_question_count(db: Session, user: User) -> None:
+    """Refund one question against the caller's monthly count.
+
+    Used when `increment_question_count` already ran for this turn but the
+    hosted generation provider then failed outright (AC-048) -- no answer
+    was produced and no assistant message was ever persisted, so the
+    caller should not be left having silently spent a real question on a
+    transient provider failure that was not their fault. Clamped at zero so
+    this can never push the count negative.
+    """
+    user.monthly_question_count = max(0, user.monthly_question_count - 1)
     db.add(user)
     db.commit()

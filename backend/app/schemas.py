@@ -89,7 +89,11 @@ class DocumentListResponse(BaseModel):
 
 
 class DocumentRenameRequest(BaseModel):
-    title: str = Field(min_length=1)
+    # max_length matches `documents.title varchar(300)` (app.models.Document)
+    # -- without it, a title near that bound round-trips fine on SQLite
+    # (which does not enforce VARCHAR length) but raises an unhandled error
+    # on Postgres, where the column actually enforces it.
+    title: str = Field(min_length=1, max_length=300)
 
 
 # ------------------------------------------------------- conversations ----
@@ -109,7 +113,9 @@ class ConversationListResponse(BaseModel):
 
 
 class ConversationCreateRequest(BaseModel):
-    title: str | None = None
+    # max_length matches `conversations.title varchar(300)` (same reasoning
+    # as DocumentRenameRequest.title above).
+    title: str | None = Field(default=None, max_length=300)
     scope_document_ids: list[uuid.UUID] | None = None
 
 

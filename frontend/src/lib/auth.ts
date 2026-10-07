@@ -38,18 +38,19 @@ export type PasswordRule = {
   test: (value: string) => boolean;
 };
 
-// Mirrors the server's password policy exactly (see backend/app/security.py
-// and the registration/reset handlers in backend/app/routers/auth.py): at
-// least 12 characters, upper and lower case letters, a digit and a symbol.
+// Mirrors the server's password policy exactly (see
+// backend/app/security.py's PASSWORD_MIN_LENGTH/PASSWORD_RULE and the
+// register/password-reset/confirm handlers in backend/app/routers/auth.py,
+// which are the only code that actually enforces this): at least 8
+// characters, including at least one letter and at least one number. This
+// list previously asserted a stricter rule (12 characters, mixed case, a
+// symbol) that the server never enforced and that `/auth/register` would
+// happily accept a password failing -- rejecting a password here that the
+// API would accept is its own contract bug, not just a cosmetic one.
 export const PASSWORD_RULES: PasswordRule[] = [
-  { id: "len", label: "At least 12 characters", test: (v) => v.length >= 12 },
-  {
-    id: "case",
-    label: "Upper and lower case letters",
-    test: (v) => /[a-z]/.test(v) && /[A-Z]/.test(v),
-  },
+  { id: "len", label: "At least 8 characters", test: (v) => v.length >= 8 },
+  { id: "letter", label: "At least one letter", test: (v) => /[A-Za-z]/.test(v) },
   { id: "num", label: "At least one number", test: (v) => /\d/.test(v) },
-  { id: "sym", label: "At least one symbol", test: (v) => /[^A-Za-z0-9]/.test(v) },
 ];
 
 export function passwordMeetsRules(password: string): boolean {

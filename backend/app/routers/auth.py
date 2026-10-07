@@ -22,6 +22,7 @@ from app.schemas import (
     VerifyResponse,
 )
 from app.security import (
+    UNKNOWN_USER_PASSWORD_HASH,
     create_access_token,
     hash_password,
     validate_password_strength,
@@ -95,10 +96,22 @@ async def login(body: LoginRequest, db: _DbSession) -> LoginResponse:
     """AC-004, AC-005, AC-006: sign in a verified user; a generic error for
     bad credentials that never distinguishes unknown-email from
     wrong-password, and a distinct, actionable error for an unverified
-    account."""
+    account.
+
+    `verify_password` always runs -- against the real hash when the email
+    matches a user, against a fixed placeholder hash
+    (`UNKNOWN_USER_PASSWORD_HASH`) otherwise -- so an unknown email takes
+    the same bcrypt-bound time to reject as a wrong password does. Without
+    this, the two cases return the same 401 body but at measurably
+    different speeds, and a timing side-channel re-opens exactly the
+    account-enumeration question the identical error message was meant to
+    close.
+    """
     email = body.email.lower()
     user = db.query(User).filter(User.email == email).first()
-    if user is None or not verify_password(body.password, user.password_hash):
+    password_hash = user.password_hash if user is not None else UNKNOWN_USER_PASSWORD_HASH
+    password_ok = verify_password(body.password, password_hash)
+    if user is None or not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_CREDENTIALS_MESSAGE
         )

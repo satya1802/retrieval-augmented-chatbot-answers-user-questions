@@ -150,8 +150,17 @@ class Conversation(Base):
     )
 
     owner: Mapped["User"] = relationship(back_populates="conversations")
+    # Ordered by `created_at`: a conversation's `GET /{id}` handler reads
+    # this relationship directly (see app.routers.conversations), and
+    # without an explicit order a plain SQLAlchemy relationship query
+    # carries no guaranteed row order at all -- some databases return rows
+    # in roughly insertion order for a simple, never-updated table, but
+    # that is not a guarantee a chat thread's chronological rendering
+    # should depend on.
     messages: Mapped[list["Message"]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan"
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="Message.created_at",
     )
 
 
