@@ -7,15 +7,12 @@ someone could get wrong or skip (see US-003-1's acceptance criteria).
 """
 
 import uuid
-from typing import TypeVar
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-ModelT = TypeVar("ModelT")
 
-
-def get_owned_or_404(
+def get_owned_or_404[ModelT](
     db: Session,
     model: type[ModelT],
     resource_id: uuid.UUID,
