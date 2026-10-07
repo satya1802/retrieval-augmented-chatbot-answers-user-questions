@@ -89,9 +89,7 @@ async def upload_document(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=SUPPORTED_TYPES_MESSAGE
         )
 
-    usage_service.check_document_capacity(
-        db, user_id, additional=len(sniffed), cap=DOCUMENTS_CAP
-    )
+    usage_service.check_document_capacity(db, user_id, additional=len(sniffed), cap=DOCUMENTS_CAP)
 
     created: list[Document] = []
     for filename, file_type, content in sniffed:

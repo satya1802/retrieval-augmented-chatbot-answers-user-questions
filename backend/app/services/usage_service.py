@@ -32,9 +32,7 @@ def check_document_capacity(
     if current_count + additional > cap:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Document cap of {cap} reached. Delete a document to free up capacity."
-            ),
+            detail=(f"Document cap of {cap} reached. Delete a document to free up capacity."),
         )
 
 
@@ -53,9 +51,7 @@ def _roll_window_if_expired(user: User) -> bool:
     return False
 
 
-def enforce_question_capacity(
-    db: Session, user: User, cap: int = MONTHLY_QUESTION_CAP
-) -> None:
+def enforce_question_capacity(db: Session, user: User, cap: int = MONTHLY_QUESTION_CAP) -> None:
     """Roll the monthly window over if it has expired, then refuse the
     question with 409 -- naming the monthly limit and the date it resets --
     if the caller has already used the window up (AC-012, defaults to the
