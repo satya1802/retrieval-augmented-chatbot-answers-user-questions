@@ -49,7 +49,10 @@ function formatDateOnly(iso: string): string {
 }
 
 function StatusChip({ status }: { status: DocumentStatus }) {
-  const map: Record<string, { label: string; Icon: typeof CheckCircle; style: React.CSSProperties }> = {
+  const map: Record<
+    string,
+    { label: string; Icon: typeof CheckCircle; style: React.CSSProperties }
+  > = {
     ready: {
       label: "Ready",
       Icon: CheckCircle,
@@ -159,7 +162,7 @@ export default function Screen() {
     window.addEventListener("keydown", onKey);
     if (confirmRef.current) confirmRef.current.focus();
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [deleteTarget]);
 
   const counts = React.useMemo(
@@ -273,8 +276,8 @@ export default function Screen() {
             My document library
           </h1>
           <p className="mt-1 max-w-2xl text-sm" style={{ color: brand.neutralColor }}>
-            Only documents marked <strong className="font-semibold">Ready</strong> are searched
-            when you ask a question.
+            Only documents marked <strong className="font-semibold">Ready</strong> are searched when
+            you ask a question.
           </p>
         </div>
         <Button
@@ -455,8 +458,8 @@ export default function Screen() {
               />
               <h3 className="mt-2 text-sm font-semibold">Your library is empty</h3>
               <p className="mx-auto mt-1 max-w-sm text-sm" style={{ color: brand.neutralColor }}>
-                Upload a PDF, Word, Markdown or plain-text file to start. Until a document is
-                ready, the chatbot has nothing to answer from.
+                Upload a PDF, Word, Markdown or plain-text file to start. Until a document is ready,
+                the chatbot has nothing to answer from.
               </p>
             </div>
           ) : visible.length === 0 ? (
@@ -605,7 +608,11 @@ export default function Screen() {
                     aria-describedby={renameError ? "rename-error" : "rename-hint"}
                     className="mt-1"
                   />
-                  <p id="rename-hint" className="mt-1 text-xs" style={{ color: brand.neutralColor }}>
+                  <p
+                    id="rename-hint"
+                    className="mt-1 text-xs"
+                    style={{ color: brand.neutralColor }}
+                  >
                     Sources in later answers will use this title.
                   </p>
                   {renameError ? (
@@ -670,8 +677,8 @@ export default function Screen() {
                   }}
                 >
                   Extracting text, chunking and embedding. This usually finishes within a couple of
-                  minutes — you can leave this page. Until it is ready, this document is not used
-                  as context.
+                  minutes — you can leave this page. Until it is ready, this document is not used as
+                  context.
                 </p>
               ) : null}
 
