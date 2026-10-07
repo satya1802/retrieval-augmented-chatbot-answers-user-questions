@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.config import DOCUMENTS_CAP
 from app.database import get_db
 from app.dependencies import get_owned_or_404
-from app.models import Document
+from app.models import Chunk, Document, MessageCitation
 from app.schemas import (
     DocumentCreateResponse,
     DocumentListResponse,
@@ -163,10 +163,36 @@ async def rename_document(
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(document_id: uuid.UUID, user_id: _CurrentUserId, db: _DbSession) -> None:
-    """AC-031, AC-008: delete the document, its original file and all
-    chunks/vectors (cascade); 404 if the caller does not own `document_id`."""
+    """AC-031, AC-008, AC-032, AC-034: delete the document, its stored
+    original and every chunk (text and embedding) belonging to it, so a
+    post-delete query for that document_id's chunks returns zero rows and
+    retrieval can never surface them again.
+
+    Past `MessageCitation` rows that point at one of these chunks are
+    updated to `chunk_id = NULL` *before* the chunks are removed: the
+    database's own `ON DELETE SET NULL` only fires when the engine enforces
+    the foreign key at delete time (Postgres does; the SQLite dev database
+    does not by default), so this is done explicitly here rather than
+    relied on implicitly, to keep past conversations rendering their
+    `document_title_snapshot`/`chunk_position` regardless of the backing
+    database.
+
+    Deleting the stored original is idempotent (app.services.storage):
+    a file already missing from disk does not raise or abort this
+    transaction. Ownership is resolved through the single
+    `get_owned_or_404` helper, so an unknown id and another user's document
+    both answer a generic 404 with no existence leak.
+    """
     doc = get_owned_or_404(db, Document, document_id, user_id, detail="document not found")
+
+    chunk_ids = [row.id for row in db.query(Chunk.id).filter(Chunk.document_id == doc.id).all()]
+    if chunk_ids:
+        db.query(MessageCitation).filter(MessageCitation.chunk_id.in_(chunk_ids)).update(
+            {MessageCitation.chunk_id: None}, synchronize_session=False
+        )
+
     if doc.storage_key:
         storage.delete_original(doc.storage_key)
+
     db.delete(doc)
     db.commit()
