@@ -1,6 +1,6 @@
 """Behavioural tests for the auth service: register, verify, login, reset."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -80,7 +80,7 @@ def test_expired_verification_token_is_rejected(client):
 
     with _SessionLocal() as db:
         auth_token = db.query(AuthToken).order_by(AuthToken.expires_at.desc()).first()
-        auth_token.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        auth_token.expires_at = datetime.now(UTC) - timedelta(seconds=1)
         db.add(auth_token)
         db.commit()
 

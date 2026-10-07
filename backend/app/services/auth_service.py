@@ -5,7 +5,7 @@ stays a thin HTTP translation of the approved contract.
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -30,7 +30,7 @@ def _hash_token(raw_token: str) -> str:
 def _issue_token(db: Session, user: User, purpose: str, ttl_seconds: int) -> str:
     # Invalidate any earlier, still-unused token for the same purpose so a
     # resend (AC-004) can't leave a still-valid token floating around.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     (
         db.query(AuthToken)
         .filter(
@@ -80,11 +80,11 @@ def consume_token(db: Session, raw_token: str, purpose: str) -> User:
 
     expires_at = token.expires_at
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
         raise TokenError("token expired")
 
-    token.used_at = datetime.now(timezone.utc)
+    token.used_at = datetime.now(UTC)
     db.add(token)
     db.commit()
 

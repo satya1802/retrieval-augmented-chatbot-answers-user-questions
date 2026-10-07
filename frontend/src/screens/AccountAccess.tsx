@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 import React from "react";
 import { useSearchParams } from "react-router-dom";
@@ -153,8 +153,8 @@ export default function Screen() {
         <div className="space-y-4">
           <Heading icon={Icons.CheckCircle}>Password updated</Heading>
           <p className="text-sm leading-6" style={{ color: "#2C3540" }}>
-            Your password has been changed. Sign in with your new password to reach your library
-            and conversations.
+            Your password has been changed. Sign in with your new password to reach your library and
+            conversations.
           </p>
           <ul className="space-y-1.5 text-sm" style={{ color: brand.neutralColor }}>
             <li className="flex items-start gap-2">
@@ -362,7 +362,12 @@ export default function Screen() {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button type="submit" className={primaryBtn} disabled={submitting} style={{ backgroundColor: brand.primaryColor, borderRadius: brand.radius }}>
+          <button
+            type="submit"
+            className={primaryBtn}
+            disabled={submitting}
+            style={{ backgroundColor: brand.primaryColor, borderRadius: brand.radius }}
+          >
             <Icons.Check className="h-4 w-4" aria-hidden="true" />
             {submitting ? "Saving…" : "Save new password"}
           </button>
@@ -413,7 +418,11 @@ export default function Screen() {
         </section>
 
         <aside className="space-y-4">
-          <section className={panelClass + " p-4"} style={panelStyle} aria-labelledby="help-heading">
+          <section
+            className={panelClass + " p-4"}
+            style={panelStyle}
+            aria-labelledby="help-heading"
+          >
             <h2
               id="help-heading"
               className="text-sm font-semibold"
