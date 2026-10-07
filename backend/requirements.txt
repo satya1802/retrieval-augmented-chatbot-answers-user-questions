@@ -10,7 +10,7 @@ email-validator>=2.2
 
 # The POST /documents endpoint accepts a multipart file upload; FastAPI only
 # parses multipart/form-data when python-multipart is installed.
-python-multipart>=0.0.12
+python-multipart==0.0.12
 
 # Auth mechanism the architecture names: JWT bearer tokens (see app/security.py)
 # and password hashing for the `users.password_hash` column.

@@ -1,9 +1,10 @@
 """Toolchain-level tests: the app starts, routes exist and auth is wired.
 
 The /auth routes are fully implemented (see tests/test_auth.py for their
-behaviour); these tests stay focused on wiring -- the OpenAPI app boots,
-every spec'd route resolves instead of 404ing, and a protected route
-rejects a missing or bad token before reaching its (still-stub) handler.
+behaviour); the /documents and /me/usage routes are also now implemented
+(see tests/test_documents.py). These tests stay focused on wiring -- the
+OpenAPI app boots, every spec'd route resolves instead of 404ing, and a
+protected route rejects a missing or bad token before reaching its handler.
 """
 
 from app.security import create_access_token
@@ -25,12 +26,12 @@ def test_protected_route_with_garbage_token_is_401(client):
     assert resp.status_code == 401
 
 
-def test_protected_route_with_valid_token_reaches_the_stub(client):
+def test_protected_route_with_valid_token_for_unknown_user_is_404(client):
     token = create_access_token(subject="11111111-1111-1111-1111-111111111111")
     resp = client.get("/me/usage", headers={"Authorization": f"Bearer {token}"})
-    # Authenticated, so it gets past app.security and hits the not-yet-built
-    # handler -- 501, not 401.
-    assert resp.status_code == 501
+    # Authenticated (past app.security), but no such user exists -- the
+    # handler itself (now implemented) answers 404, not 401 or 501.
+    assert resp.status_code == 404
 
 
 def test_documents_list_requires_auth(client):

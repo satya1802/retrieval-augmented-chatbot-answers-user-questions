@@ -71,8 +71,17 @@ class DocumentOut(BaseModel):
     uploaded_at: datetime
 
 
+class RejectedFileOut(BaseModel):
+    """A file submitted alongside others in the same upload that was not
+    stored or turned into a Document row (AC-015, AC-017)."""
+
+    filename: str
+    reason: str
+
+
 class DocumentCreateResponse(BaseModel):
-    document: DocumentOut
+    documents: list[DocumentOut]
+    rejected: list[RejectedFileOut] = []
 
 
 class DocumentListResponse(BaseModel):
