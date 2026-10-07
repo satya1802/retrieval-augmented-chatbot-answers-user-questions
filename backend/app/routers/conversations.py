@@ -12,12 +12,23 @@ grounded response with citations, the exact insufficient-context string, a
 refusal with no citations, or a 502 error when the provider itself fails.
 It never invents an answer and never falls back to documents outside the
 scope.
+
+US-020-1 adds a streaming variant of the same endpoint: a client that sends
+`Accept: text/event-stream` or `?stream=1` gets Server-Sent Events --
+incremental `delta` events as the provider's answer arrives, followed by a
+terminal `done` event carrying the persisted message and its citations, or
+an `error` event when generation fails part-way. A caller that sends
+neither gets the exact same JSON response as before (`AskQuestionResponse`)
+-- the streaming branch is additive, not a replacement.
 """
 
+import json
 import uuid
+from collections.abc import Generator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.config import MONTHLY_QUESTION_CAP
@@ -37,7 +48,7 @@ from app.schemas import (
 )
 from app.security import get_current_user_id
 from app.services import usage_service
-from app.services.generation_client import GenerationError, REFUSAL_MESSAGE, get_generation_client
+from app.services.generation_client import REFUSAL_MESSAGE, GenerationError, get_generation_client
 from app.services.retrieval import READY_STATUS, ContextChunk, retrieve_context
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -64,6 +75,7 @@ _GENERATION_FAILURE_DETAIL = (
 )
 
 _SCOPE_VALIDATION_DETAIL = "scope_document_ids must reference the caller's own ready documents"
+_EMPTY_QUESTION_DETAIL = "question must not be empty"
 
 # AC-065: no citations are attached to a refusal (reveal-system-prompt /
 # hidden-instructions / chain-of-thought request) any more than to the
@@ -150,21 +162,134 @@ def _build_context_text(chunks: list[ContextChunk]) -> str:
     return "\n\n".join(sections)
 
 
+def _wants_stream(request: Request) -> bool:
+    """A client opts into Server-Sent Events via `?stream=1` or
+    `Accept: text/event-stream` (US-020-1); anyone who sends neither gets
+    the original, byte-compatible JSON response."""
+    if request.query_params.get("stream") == "1":
+        return True
+    accept = request.headers.get("accept", "")
+    return "text/event-stream" in accept
+
+
+def _sse_event(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _persist_simple_answer(db: Session, conversation: Conversation, content: str) -> Message:
+    """Persist a fixed, non-generated answer (empty-library or
+    insufficient-context) with no citations, identically to the
+    non-streaming path."""
+    assistant_message = Message(
+        conversation_id=conversation.id, role="assistant", content=content, is_incomplete=False
+    )
+    db.add(assistant_message)
+    db.commit()
+    db.refresh(assistant_message)
+    return assistant_message
+
+
+def _stream_simple_answer(
+    db: Session, conversation: Conversation, content: str
+) -> Generator[str, None, None]:
+    assistant_message = _persist_simple_answer(db, conversation, content)
+    yield _sse_event("delta", {"text": content})
+    yield _sse_event(
+        "done",
+        {
+            "message": MessageOut.model_validate(assistant_message).model_dump(mode="json"),
+            "citations": [],
+        },
+    )
+
+
+def _stream_generated_answer(
+    db: Session,
+    conversation: Conversation,
+    question: str,
+    retrieved: list[ContextChunk],
+) -> Generator[str, None, None]:
+    """AC-070 (backend half): stream the provider's answer token by token.
+    On a mid-stream failure, whatever text was already emitted is persisted
+    verbatim (never completed or fabricated) with `is_incomplete=True` and
+    no citations, and a terminal `error` event names that message's id so
+    the client can render it as incomplete; re-asking creates a brand new
+    assistant message, since nothing here mutates or reuses this one."""
+    context_text = _build_context_text(retrieved)
+    accumulated = ""
+    try:
+        for delta_text in get_generation_client().generate_stream(question, context_text):
+            accumulated += delta_text
+            yield _sse_event("delta", {"text": delta_text})
+    except GenerationError:
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content=accumulated,
+            is_incomplete=True,
+        )
+        db.add(assistant_message)
+        db.commit()
+        db.refresh(assistant_message)
+        yield _sse_event(
+            "error",
+            {
+                "detail": _GENERATION_FAILURE_DETAIL,
+                "message_id": str(assistant_message.id),
+                "is_incomplete": True,
+            },
+        )
+        return
+
+    content = accumulated
+    assistant_message = Message(
+        conversation_id=conversation.id, role="assistant", content=content, is_incomplete=False
+    )
+    db.add(assistant_message)
+    db.flush()
+
+    # AC-050, AC-065: no citations on a response that is exactly the
+    # insufficient-context sentence or the system-prompt-disclosure refusal.
+    citation_chunks = retrieved if content.strip() not in _UNCITED_ANSWERS else []
+    citation_rows = [
+        MessageCitation(
+            message_id=assistant_message.id,
+            chunk_id=chunk.chunk_id,
+            document_title_snapshot=chunk.document_title,
+            chunk_position=chunk.position,
+        )
+        for chunk in citation_chunks
+    ]
+    db.add_all(citation_rows)
+    db.commit()
+    db.refresh(assistant_message)
+
+    yield _sse_event(
+        "done",
+        {
+            "message": MessageOut.model_validate(assistant_message).model_dump(mode="json"),
+            "citations": [CitationOut.model_validate(c).model_dump(mode="json") for c in citation_rows],
+        },
+    )
+
+
 @router.post("/{conversation_id}/messages", response_model=AskQuestionResponse)
 async def ask_question(
     conversation_id: uuid.UUID,
     body: AskQuestionRequest,
+    request: Request,
     user_id: _CurrentUserId,
     db: _DbSession,
-) -> AskQuestionResponse:
+) -> AskQuestionResponse | StreamingResponse:
     """AC-039, AC-040, AC-041, AC-038, AC-032, AC-012, AC-009, AC-045
-    through AC-051, AC-059 through AC-066: ownership and the monthly
-    question cap are both enforced before anything else runs, including
-    before any embedding/retrieval/generation call (AC-012). Retrieval is
-    then scoped to exactly `conversation.scope_document_ids` when a scope
-    is set (AC-039) -- so chunks from an unselected document are never in
-    the context set -- or to all of the caller's ready documents when no
-    scope is set (AC-040).
+    through AC-051, AC-059 through AC-066, AC-070: ownership and the
+    monthly question cap are both enforced before anything else runs,
+    including before any embedding/retrieval/generation call (AC-012), and
+    an empty or whitespace-only question is rejected with 422 before any of
+    that too. Retrieval is then scoped to exactly
+    `conversation.scope_document_ids` when a scope is set (AC-039) -- so
+    chunks from an unselected document are never in the context set -- or
+    to all of the caller's ready documents when no scope is set (AC-040).
 
     A caller with no ready documents at all in the relevant scope never
     reaches retrieval -- let alone an embedding or generation provider call
@@ -175,17 +300,28 @@ async def ask_question(
     outputs -- summaries, steps, recommendations, comparisons -- and
     safety-sensitive requests -- ambiguity, verbatim quoting, system-prompt
     disclosure, out-of-scope questions -- with the same context-only
-    grounding and traceability as a direct answer. Its answer is used
-    verbatim unless it is exactly the insufficient-context sentence or the
-    system-prompt-disclosure refusal, in which case no citations are
-    attached (AC-050, AC-065). The assistant message and its citations are
-    only persisted after a successful generation call: a provider failure
-    or timeout raises a 502 instead, with no assistant message, partial or
-    otherwise, stored (AC-048).
+    grounding and traceability as a direct answer.
+
+    A caller that sends `Accept: text/event-stream` or `?stream=1` gets the
+    same decision (empty-library / insufficient-context / generated
+    answer) delivered as Server-Sent Events instead of a single JSON body
+    (US-020-1); anyone else gets the original `AskQuestionResponse`
+    byte-compatibly. The assistant message and its citations are only
+    persisted after a successful generation call in the non-streaming
+    path -- a provider failure or timeout raises a 502 instead, with no
+    assistant message, partial or otherwise, stored (AC-048). In the
+    streaming path a provider failure mid-answer instead persists the
+    partial text already emitted, flagged `is_incomplete=True`, and
+    terminates the stream with an `error` event (AC-070).
     """
     conversation = get_owned_or_404(
         db, Conversation, conversation_id, user_id, detail="conversation not found"
     )
+
+    if not body.question.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_EMPTY_QUESTION_DETAIL
+        )
 
     user = db.get(User, user_id)
     usage_service.enforce_question_capacity(db, user, cap=MONTHLY_QUESTION_CAP)
@@ -209,28 +345,39 @@ async def ask_question(
     db.add(user_message)
     db.commit()
 
+    retrieved: list[ContextChunk] = []
+    if has_ready_documents:
+        retrieved = retrieve_context(db, user_id, body.question, document_ids=scope_ids)
+
+    if _wants_stream(request):
+        if not has_ready_documents:
+            generator = _stream_simple_answer(db, conversation, EMPTY_LIBRARY_MESSAGE)
+        elif not retrieved:
+            generator = _stream_simple_answer(db, conversation, INSUFFICIENT_CONTEXT_MESSAGE)
+        else:
+            generator = _stream_generated_answer(db, conversation, body.question, retrieved)
+        return StreamingResponse(generator, media_type="text/event-stream")
+
     citation_chunks: list[ContextChunk] = []
     if not has_ready_documents:
         content = EMPTY_LIBRARY_MESSAGE
+    elif not retrieved:
+        content = INSUFFICIENT_CONTEXT_MESSAGE
     else:
-        retrieved = retrieve_context(db, user_id, body.question, document_ids=scope_ids)
-        if not retrieved:
-            content = INSUFFICIENT_CONTEXT_MESSAGE
-        else:
-            context_text = _build_context_text(retrieved)
-            try:
-                content = get_generation_client().generate(body.question, context_text)
-            except GenerationError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=_GENERATION_FAILURE_DETAIL,
-                ) from exc
-            # AC-050, AC-065: no sources attached to a response the
-            # provider itself judged unsupported by the retrieved context,
-            # nor to a refusal to disclose the system prompt / hidden
-            # instructions / chain-of-thought.
-            if content.strip() not in _UNCITED_ANSWERS:
-                citation_chunks = retrieved
+        context_text = _build_context_text(retrieved)
+        try:
+            content = get_generation_client().generate(body.question, context_text)
+        except GenerationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=_GENERATION_FAILURE_DETAIL,
+            ) from exc
+        # AC-050, AC-065: no sources attached to a response the
+        # provider itself judged unsupported by the retrieved context,
+        # nor to a refusal to disclose the system prompt / hidden
+        # instructions / chain-of-thought.
+        if content.strip() not in _UNCITED_ANSWERS:
+            citation_chunks = retrieved
 
     assistant_message = Message(
         conversation_id=conversation.id,

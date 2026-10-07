@@ -232,6 +232,165 @@ export function askQuestion(
   });
 }
 
+// ------------------------------------------------------- streaming ask --
+
+/** Callbacks for `streamAskQuestion` (US-020-1's SSE contract: `delta`,
+ * `done`, `error` events over `POST /conversations/:id/messages`).
+ * `onError` and `onStreamEnded` are both "this turn did not finish
+ * cleanly" signals -- `onError` fires when the server sent an explicit
+ * `error` event (or the request failed before any event arrived at all),
+ * `onStreamEnded` fires when the connection simply closed without a
+ * `done` or `error` ever being seen. Callers (Chat.tsx) treat both the
+ * same way: AC-070 if any text had already streamed in, AC-048's
+ * generation-failed message otherwise. */
+export type AskStreamHandlers = {
+  onDelta: (textDelta: string) => void;
+  onDone: (result: AskQuestionResponse) => void;
+  onError: (message?: string) => void;
+  onStreamEnded: () => void;
+};
+
+function parseSseEvent(raw: string): { event: string; data: string } {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice("event:".length).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trim());
+    }
+  }
+  return { event, data: dataLines.join("\n") };
+}
+
+/**
+ * Streams an answer for `question` in `conversationId`, invoking
+ * `handlers` as `delta`/`done`/`error` events arrive on the SSE response.
+ *
+ * Screens never call `fetch` directly (per constraint) -- this is the one
+ * seam that does, alongside `apiFetch`. It is a separate function rather
+ * than a mode of `apiFetch` because the two have incompatible response
+ * handling: `apiFetch` always awaits one JSON body, this reads an
+ * event-stream incrementally and can also fall back to a single JSON body
+ * when the response has no readable stream (a plain non-streaming mock or
+ * backend), so callers written against the contract keep working either
+ * way.
+ */
+export async function streamAskQuestion(
+  conversationId: string,
+  question: string,
+  handlers: AskStreamHandlers,
+): Promise<void> {
+  const token = getToken();
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ question }),
+    });
+  } catch {
+    // Network failure before any token arrived (AC-048's second case).
+    handlers.onError();
+    return;
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 && token) {
+      clearToken();
+      if (typeof window !== "undefined") {
+        const next = encodeURIComponent(`${window.location.pathname}${window.location.search}`);
+        window.location.assign(`/sign-in?next=${next}`);
+      }
+    }
+    const detail = await readDetail(response);
+    handlers.onError(detail);
+    return;
+  }
+
+  const body = response.body as ReadableStream<Uint8Array> | null | undefined;
+  if (!body || typeof body.getReader !== "function") {
+    // No readable stream on this response -- either a backend that still
+    // answers with one JSON body, or a test double. Treat the whole body
+    // as the final `done` payload rather than attempting to parse it as
+    // SSE framing.
+    try {
+      const result = (await response.json()) as AskQuestionResponse;
+      handlers.onDone(result);
+    } catch {
+      handlers.onError();
+    }
+    return;
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let settled = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sepIndex = buffer.indexOf("\n\n");
+      while (sepIndex !== -1) {
+        const rawEvent = buffer.slice(0, sepIndex);
+        buffer = buffer.slice(sepIndex + 2);
+        const { event, data } = parseSseEvent(rawEvent);
+        if (data.length > 0) {
+          if (event === "delta") {
+            try {
+              // The SSE contract's delta payload carries the text chunk as
+              // `content`; `text` is accepted too in case a future
+              // revision of the contract renames the field.
+              const parsed = JSON.parse(data) as { content?: string; text?: string };
+              const chunk = parsed.content ?? parsed.text;
+              if (typeof chunk === "string" && chunk.length > 0) {
+                handlers.onDelta(chunk);
+              }
+            } catch {
+              // Malformed delta frame -- skip rather than throw mid-stream.
+            }
+          } else if (event === "done") {
+            settled = true;
+            try {
+              const parsed = JSON.parse(data) as AskQuestionResponse;
+              handlers.onDone(parsed);
+            } catch {
+              handlers.onError();
+            }
+          } else if (event === "error") {
+            settled = true;
+            let message: string | undefined;
+            try {
+              const parsed = JSON.parse(data) as { detail?: string; message?: string };
+              message = parsed.detail ?? parsed.message;
+            } catch {
+              message = undefined;
+            }
+            handlers.onError(message);
+          }
+        }
+        sepIndex = buffer.indexOf("\n\n");
+      }
+    }
+  } catch {
+    // The connection dropped mid-read.
+    if (!settled) handlers.onStreamEnded();
+    return;
+  }
+
+  if (!settled) {
+    // AC-070: the stream closed without a `done` or `error` event.
+    handlers.onStreamEnded();
+  }
+}
+
 export function getChunk(chunkId: string): Promise<ChunkDetailResponse> {
   return apiFetch<ChunkDetailResponse>(`/chunks/${chunkId}`);
 }

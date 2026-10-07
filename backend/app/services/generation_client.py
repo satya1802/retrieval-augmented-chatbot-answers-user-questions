@@ -1,5 +1,5 @@
 """Hosted chat/generation provider client, behind one injectable, mockable
-seam (US-014-1, extended by US-018-1).
+seam (US-014-1, extended by US-018-1, extended for streaming by US-020-1).
 
 Mirrors app/services/embedding_client.py: every call site asks
 `get_generation_client()` for the shared instance rather than constructing
@@ -11,6 +11,8 @@ injectable client; no direct SDK calls at a call site").
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
 
 from app.config import (
     AI_PROVIDER_API_KEY,
@@ -127,23 +129,26 @@ class GenerationClient:
             )
         return self._sdk_client
 
+    @staticmethod
+    def _user_prompt(question: str, context: str) -> str:
+        return (
+            f"Context passages:\n{context}\n\n"
+            f"Question: {question}\n\n"
+            "Answer using only the context passages above."
+        )
+
     def generate(self, question: str, context: str) -> str:
         """Synthesise an answer to `question` from `context` alone -- the
         only content passed to the provider besides `SYSTEM_PROMPT`
         (AC-045). Any SDK failure, timeout, or empty response is raised as
         `GenerationError`, never swallowed into a fabricated answer."""
-        user_prompt = (
-            f"Context passages:\n{context}\n\n"
-            f"Question: {question}\n\n"
-            "Answer using only the context passages above."
-        )
         try:
             response = self._client().chat.completions.create(
                 model=self.model,
                 timeout=self.timeout,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": self._user_prompt(question, context)},
                 ],
             )
         except Exception as exc:  # noqa: BLE001 -- any provider/SDK failure is one error type
@@ -154,6 +159,45 @@ class GenerationClient:
         if not content or not content.strip():
             raise GenerationError("the hosted provider returned an empty answer")
         return content.strip()
+
+    def generate_stream(self, question: str, context: str) -> Iterator[str]:
+        """Same prompt as `generate`, but yields incremental text deltas as
+        they arrive from the provider instead of waiting for the full
+        completion (US-020-1). A generator function's body only runs on
+        first iteration, so a failure to even start the call -- same as a
+        failure mid-stream, or an entirely empty stream -- always surfaces
+        as `GenerationError` raised *during* iteration, never before the
+        caller starts consuming it and never as a silently truncated
+        stream with no error at all.
+        """
+        try:
+            stream = self._client().chat.completions.create(
+                model=self.model,
+                timeout=self.timeout,
+                stream=True,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": self._user_prompt(question, context)},
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001 -- any provider/SDK failure is one error type
+            raise GenerationError("the hosted provider call failed") from exc
+
+        emitted_any = False
+        try:
+            for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                delta = choice.delta.content if choice is not None and choice.delta else None
+                if delta:
+                    emitted_any = True
+                    yield delta
+        except GenerationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- any provider/SDK failure is one error type
+            raise GenerationError("the hosted provider stream failed") from exc
+
+        if not emitted_any:
+            raise GenerationError("the hosted provider returned an empty answer")
 
 
 _default_client: GenerationClient | None = None

@@ -5,12 +5,13 @@ import { Icons } from "@/lib/icons";
 import { brand } from "@/lib/brand";
 import {
   ApiError,
-  askQuestion,
   createConversation,
   getChunk,
   getConversation,
   listConversations,
   listDocuments,
+  streamAskQuestion,
+  type AskQuestionResponse,
   type ChunkDetailResponse,
   type CitationOut,
   type ConversationOut,
@@ -18,14 +19,15 @@ import {
   type MessageOut,
 } from "@/lib/api";
 
-const { Button, Textarea, Card, Separator, Checkbox, Label } = UI;
+const { Button, Textarea, Card, Separator, Checkbox, Label, Badge } = UI;
 const { Plus, FileText, AlertCircle, ArrowRight, X, Check } = Icons;
 
 const NOT_FOUND_EVIDENCE = "This source document is no longer available";
-// AC-048: the one message shown whenever the ask endpoint reports a
-// generation failure (502) -- distinct from a network/validation error so
-// the visitor isn't told their request was malformed when it is the
-// generation step, specifically, that failed.
+// AC-048, AC-070: the one message shown whenever the ask stream fails
+// before any answer text arrived -- a 502 from the endpoint, a network
+// failure, or a connection that closed with nothing read at all. Distinct
+// from a *partial* answer (AC-070's other case), which is rendered and
+// marked incomplete instead of replaced by this banner.
 const GENERATION_FAILED_MESSAGE = "The answer could not be generated. Try again.";
 
 type LoadState = "loading" | "ready" | "error";
@@ -158,6 +160,15 @@ export default function Screen() {
   const [asking, setAsking] = React.useState(false);
   const [askError, setAskError] = React.useState("");
 
+  // AC-068: the id of the assistant message currently receiving `delta`
+  // events -- drives the in-progress indicator and withholds the Sources
+  // section until the answer is actually done. AC-070: the id of a
+  // message whose stream ended before `done`/`error` arrived -- rendered
+  // with its partial text, visibly marked incomplete, and a Retry control.
+  const [streamingId, setStreamingId] = React.useState<string | null>(null);
+  const [truncatedId, setTruncatedId] = React.useState<string | null>(null);
+  const [lastQuestion, setLastQuestion] = React.useState("");
+
   // ------------------------------------------------------------ evidence --
   const [activeCitation, setActiveCitation] = React.useState<CitationOut | null>(null);
   const [chunk, setChunk] = React.useState<ChunkDetailResponse | null>(null);
@@ -211,6 +222,8 @@ export default function Screen() {
     setActiveCitation(null);
     setChunk(null);
     setChunkState("idle");
+    setStreamingId(null);
+    setTruncatedId(null);
     try {
       const detail = await getConversation(id);
       setMessages(detail.messages);
@@ -234,6 +247,9 @@ export default function Screen() {
     setChunk(null);
     setChunkState("idle");
     setAskError("");
+    setStreamingId(null);
+    setTruncatedId(null);
+    setLastQuestion("");
   }
 
   function toggleScopeDoc(id: string) {
@@ -252,12 +268,15 @@ export default function Screen() {
     setCustomScopeIds(new Set());
   }
 
-  async function submitQuestion(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = question.trim();
-    if (trimmed === "") return;
+  // AC-067 through AC-070: runs one ask -- creating the conversation if
+  // needed, appending the user's question and an empty assistant draft,
+  // then streaming the answer into that draft token by token. Shared by
+  // the composer submit and the Retry control so a retry is exactly
+  // "re-ask the same question" rather than a second code path.
+  async function askFlow(trimmed: string) {
     setAsking(true);
     setAskError("");
+    setTruncatedId(null);
     try {
       let conversationId = activeId;
       if (!conversationId) {
@@ -267,6 +286,7 @@ export default function Screen() {
         setActiveId(conversationId);
         setConversations((prev) => [created.conversation, ...prev]);
       }
+
       const optimisticUser: MessageOut = {
         id: `pending-${Date.now()}`,
         role: "user",
@@ -275,24 +295,87 @@ export default function Screen() {
         created_at: new Date().toISOString(),
         citations: [],
       };
-      setMessages((prev) => [...prev, optimisticUser]);
-      setQuestion("");
-      const res = await askQuestion(conversationId, trimmed);
-      // AC-048: the assistant bubble is only ever appended on success --
-      // a thrown error below leaves the thread with just the user's
-      // question, never a half-built assistant message.
-      setMessages((prev) => [...prev, res.message]);
+      const draftId = `streaming-${Date.now()}`;
+      const draftMessage: MessageOut = {
+        id: draftId,
+        role: "assistant",
+        content: "",
+        is_incomplete: false,
+        created_at: new Date().toISOString(),
+        citations: [],
+      };
+      setMessages((prev) => [...prev, optimisticUser, draftMessage]);
+      setLastQuestion(trimmed);
+      setStreamingId(draftId);
+
+      let draftContent = "";
+      let gotAnyDelta = false;
+
+      const clearStreaming = () =>
+        setStreamingId((prev) => (prev === draftId ? null : prev));
+
+      const handleCutShort = () => {
+        if (!gotAnyDelta) {
+          // AC-048/AC-070: nothing ever rendered for this turn -- remove
+          // the empty draft bubble and show the banner instead.
+          setMessages((prev) => prev.filter((m) => m.id !== draftId));
+          setAskError(GENERATION_FAILED_MESSAGE);
+        } else {
+          // Partial text already arrived: keep it, mark it incomplete,
+          // offer Retry -- do not discard it and do not show the banner.
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === draftId ? { ...m, content: draftContent, is_incomplete: true } : m,
+            ),
+          );
+          setTruncatedId(draftId);
+        }
+      };
+
+      await streamAskQuestion(conversationId, trimmed, {
+        onDelta: (textDelta) => {
+          gotAnyDelta = true;
+          draftContent += textDelta;
+          setMessages((prev) =>
+            prev.map((m) => (m.id === draftId ? { ...m, content: draftContent } : m)),
+          );
+        },
+        onDone: (result: AskQuestionResponse) => {
+          clearStreaming();
+          setMessages((prev) => prev.map((m) => (m.id === draftId ? result.message : m)));
+        },
+        onError: () => {
+          clearStreaming();
+          handleCutShort();
+        },
+        onStreamEnded: () => {
+          // AC-070: the connection closed before `done` or `error` arrived.
+          clearStreaming();
+          handleCutShort();
+        },
+      });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 502) {
-        setAskError(GENERATION_FAILED_MESSAGE);
-      } else {
-        setAskError(
-          err instanceof ApiError ? err.message : "Could not send your question. Try again.",
-        );
-      }
+      setAskError(
+        err instanceof ApiError ? err.message : "Could not send your question. Try again.",
+      );
     } finally {
       setAsking(false);
     }
+  }
+
+  async function submitQuestion(e: React.FormEvent) {
+    e.preventDefault();
+    // AC-069: an empty or whitespace-only question sends nothing at all.
+    const trimmed = question.trim();
+    if (trimmed === "") return;
+    setQuestion("");
+    await askFlow(trimmed);
+  }
+
+  async function retryLastQuestion() {
+    if (!lastQuestion || asking) return;
+    setTruncatedId(null);
+    await askFlow(lastQuestion);
   }
 
   async function inspectCitation(citation: CitationOut) {
@@ -415,73 +498,113 @@ export default function Screen() {
               </p>
             ) : (
               <ul className="space-y-4">
-                {messages.map((m) => (
-                  <li key={m.id}>
-                    <div
-                      className="max-w-[90%] rounded-lg px-3 py-2 text-sm"
-                      style={
-                        m.role === "user"
-                          ? { backgroundColor: "#E8EEF4", marginLeft: "auto" }
-                          : { backgroundColor: "#F3F5F7" }
-                      }
-                    >
-                      {m.role === "user" ? (
-                        <p className="whitespace-pre-wrap">{m.content}</p>
-                      ) : (
-                        <div>
-                          {/* AC-052: the Answer heading precedes the body
-                              of every assistant message. */}
-                          <h3
-                            className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
-                            style={{ color: brand.primaryColor }}
-                          >
-                            Answer
-                          </h3>
-                          <AnswerBody
-                            content={m.content}
-                            citations={m.citations}
-                            onCite={inspectCitation}
-                          />
-                        </div>
-                      )}
-                    </div>
-                    {m.role !== "user" ? (
-                      <div className="mt-1.5">
-                        {/* AC-052: Sources follows Answer for every
-                            assistant message, even when there is nothing
-                            to list (AC-054, AC-050) -- no placeholder or
-                            invented source is ever rendered here. */}
-                        <h4
-                          className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
-                          style={{ color: brand.neutralColor }}
-                        >
-                          Sources
-                        </h4>
-                        {m.citations.length === 0 ? (
-                          <p className="text-xs" style={{ color: brand.neutralColor }}>
-                            No sources.
-                          </p>
+                {messages.map((m) => {
+                  const isStreaming = streamingId === m.id;
+                  const isTruncated = truncatedId === m.id;
+                  return (
+                    <li key={m.id}>
+                      <div
+                        className="max-w-[90%] rounded-lg px-3 py-2 text-sm"
+                        style={
+                          m.role === "user"
+                            ? { backgroundColor: "#E8EEF4", marginLeft: "auto" }
+                            : { backgroundColor: "#F3F5F7" }
+                        }
+                      >
+                        {m.role === "user" ? (
+                          <p className="whitespace-pre-wrap">{m.content}</p>
                         ) : (
-                          <ul className="flex flex-wrap gap-1.5">
-                            {m.citations.map((cit, idx) => (
-                              <li key={`${m.id}-${idx}`}>
-                                <button
-                                  type="button"
-                                  onClick={() => void inspectCitation(cit)}
-                                  className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs font-medium hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1"
-                                  style={{ borderColor: "#CBD5E1", color: brand.primaryColor }}
+                          <div>
+                            {/* AC-052: the Answer heading precedes the body
+                                of every assistant message. */}
+                            <h3
+                              className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
+                              style={{ color: brand.primaryColor }}
+                            >
+                              Answer
+                            </h3>
+                            {isStreaming ? (
+                              // AC-068: a visible in-progress indicator from
+                              // submit until the answer completes.
+                              <p
+                                role="status"
+                                className="mb-1 text-xs italic"
+                                style={{ color: brand.neutralColor }}
+                              >
+                                Generating answer…
+                              </p>
+                            ) : null}
+                            <AnswerBody
+                              content={m.content}
+                              citations={m.citations}
+                              onCite={inspectCitation}
+                            />
+                            {isTruncated ? (
+                              // AC-070: the partial answer is rendered and
+                              // visibly marked incomplete, with a Retry
+                              // control that re-asks the same question.
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <Badge variant="warning">Incomplete</Badge>
+                                <span
+                                  className="text-xs"
+                                  style={{ color: brand.neutralColor }}
                                 >
-                                  <FileText className="h-3 w-3" aria-hidden="true" />
-                                  {cit.document_title_snapshot}
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
+                                  The connection ended before the answer finished.
+                                </span>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={asking}
+                                  onClick={() => void retryLastQuestion()}
+                                >
+                                  Retry
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
                         )}
                       </div>
-                    ) : null}
-                  </li>
-                ))}
+                      {m.role !== "user" && !isStreaming && !isTruncated ? (
+                        <div className="mt-1.5">
+                          {/* AC-052: Sources follows Answer for every
+                              completed assistant message, even when there
+                              is nothing to list (AC-054, AC-050) -- no
+                              placeholder or invented source is ever
+                              rendered here. A message still streaming or
+                              cut short never reaches this section at all. */}
+                          <h4
+                            className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
+                            style={{ color: brand.neutralColor }}
+                          >
+                            Sources
+                          </h4>
+                          {m.citations.length === 0 ? (
+                            <p className="text-xs" style={{ color: brand.neutralColor }}>
+                              No sources.
+                            </p>
+                          ) : (
+                            <ul className="flex flex-wrap gap-1.5">
+                              {m.citations.map((cit, idx) => (
+                                <li key={`${m.id}-${idx}`}>
+                                  <button
+                                    type="button"
+                                    onClick={() => void inspectCitation(cit)}
+                                    className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs font-medium hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1"
+                                    style={{ borderColor: "#CBD5E1", color: brand.primaryColor }}
+                                  >
+                                    <FileText className="h-3 w-3" aria-hidden="true" />
+                                    {cit.document_title_snapshot}
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
