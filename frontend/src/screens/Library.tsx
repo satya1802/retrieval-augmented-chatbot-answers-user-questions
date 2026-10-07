@@ -6,8 +6,8 @@ import { Icons } from "@/lib/icons";
 import { brand } from "@/lib/brand";
 import { useNavigate } from "@/lib/navigate";
 
-const { Button, Card, Input, Label, Select, Table, THead, TBody, TR, TH, TD, Separator } = UI;
-const { Plus, Search, Check, X, FileText, Clock, Trash, Edit, Filter, Upload, ArrowRight, AlertCircle, CheckCircle } = Icons;
+const { Select } = UI;
+const { Filter } = Icons;
 
 const { Button, Card, Input, Label, Table, THead, TBody, TR, TH, TD, Separator } = UI;
 const {
