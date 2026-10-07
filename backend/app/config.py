@@ -28,6 +28,13 @@ EMBEDDING_MODEL = os.getenv("AI_PROVIDER_EMBEDDING_MODEL", "text-embedding-3-sma
 AI_PROVIDER_API_KEY = os.getenv("AI_PROVIDER_API_KEY", "")
 AI_PROVIDER_BASE_URL = os.getenv("AI_PROVIDER_BASE_URL") or None
 
+# ai_provider -- hosted commercial chat/generation model, OpenAI-compatible
+# (see app/services/generation_client.py, US-014-1). Timeout bounds how long
+# the answer-generation call site waits before a hung provider surfaces as
+# a failure (AC-048) rather than hanging the request indefinitely.
+CHAT_MODEL = os.getenv("AI_PROVIDER_CHAT_MODEL", "gpt-4o-mini")
+GENERATION_TIMEOUT_SECONDS = float(os.getenv("AI_PROVIDER_TIMEOUT_SECONDS", "30"))
+
 # Retrieval (see app/services/retrieval.py): the fixed number of the
 # caller's highest-scoring ready chunks returned as answer context per
 # question (AC-035, AC-037). One constant so a test or deployment overrides

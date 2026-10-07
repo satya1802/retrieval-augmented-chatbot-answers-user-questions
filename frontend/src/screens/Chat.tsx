@@ -22,6 +22,11 @@ const { Button, Textarea, Card, Separator, Checkbox, Label } = UI;
 const { Plus, FileText, AlertCircle, ArrowRight, X, Check } = Icons;
 
 const NOT_FOUND_EVIDENCE = "This source document is no longer available";
+// AC-048: the one message shown whenever the ask endpoint reports a
+// generation failure (502) -- distinct from a network/validation error so
+// the visitor isn't told their request was malformed when it is the
+// generation step, specifically, that failed.
+const GENERATION_FAILED_MESSAGE = "The answer could not be generated. Try again.";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -37,6 +42,96 @@ function formatStamp(iso: string): string {
 }
 
 type ChunkState = "idle" | "loading" | "ready" | "error";
+
+// ------------------------------------------------------------- answer body --
+// AC-056: a blank line separates paragraphs from bulleted lists. A block is
+// treated as a list only when every one of its lines starts with "-" or
+// "*" -- anything else, including a block that mixes prose and bullets,
+// renders as a single paragraph rather than guessing at structure the
+// backend did not send. This is formatting only: no answer text is
+// invented or altered, only laid out.
+type AnswerBlock = { type: "list"; items: string[] } | { type: "para"; text: string };
+
+function parseAnswerBlocks(content: string): AnswerBlock[] {
+  const blocks = content
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter((b) => b.length > 0);
+  if (blocks.length === 0) return [];
+  return blocks.map((block) => {
+    const lines = block
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    const isList = lines.length > 0 && lines.every((l) => /^[-*]\s+/.test(l));
+    if (isList) {
+      return { type: "list", items: lines.map((l) => l.replace(/^[-*]\s+/, "")) };
+    }
+    return { type: "para", text: block };
+  });
+}
+
+// AC-053: inline citation markers -- "[1]", "[2]", ... -- reference the
+// message's own `citations` array by position (1-indexed, matching how the
+// markers read). A marker with no matching citation renders as plain text
+// rather than a dead button.
+function renderInlineText(
+  text: string,
+  citations: CitationOut[],
+  onCite: (citation: CitationOut) => void,
+): React.ReactNode[] {
+  const parts = text.split(/(\[\d+\])/g);
+  return parts.map((part, i) => {
+    const match = part.match(/^\[(\d+)\]$/);
+    if (match) {
+      const citation = citations[Number(match[1]) - 1];
+      if (citation) {
+        return (
+          <button
+            key={i}
+            type="button"
+            onClick={() => onCite(citation)}
+            className="mx-0.5 rounded px-0.5 text-xs font-semibold underline decoration-dotted hover:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1"
+            style={{ color: brand.primaryColor }}
+            aria-label={`View source ${match[1]}: ${citation.document_title_snapshot}`}
+          >
+            {part}
+          </button>
+        );
+      }
+    }
+    return <React.Fragment key={i}>{part}</React.Fragment>;
+  });
+}
+
+function AnswerBody({
+  content,
+  citations,
+  onCite,
+}: {
+  content: string;
+  citations: CitationOut[];
+  onCite: (citation: CitationOut) => void;
+}) {
+  const blocks = parseAnswerBlocks(content);
+  return (
+    <div className="space-y-2">
+      {blocks.map((block, i) =>
+        block.type === "list" ? (
+          <ul key={i} className="ml-4 list-disc space-y-1">
+            {block.items.map((item, j) => (
+              <li key={j}>{renderInlineText(item, citations, onCite)}</li>
+            ))}
+          </ul>
+        ) : (
+          <p key={i} className="whitespace-pre-wrap">
+            {renderInlineText(block.text, citations, onCite)}
+          </p>
+        ),
+      )}
+    </div>
+  );
+}
 
 export default function Screen() {
   // ------------------------------------------------------- conversations --
@@ -183,11 +278,18 @@ export default function Screen() {
       setMessages((prev) => [...prev, optimisticUser]);
       setQuestion("");
       const res = await askQuestion(conversationId, trimmed);
+      // AC-048: the assistant bubble is only ever appended on success --
+      // a thrown error below leaves the thread with just the user's
+      // question, never a half-built assistant message.
       setMessages((prev) => [...prev, res.message]);
     } catch (err) {
-      setAskError(
-        err instanceof ApiError ? err.message : "Could not send your question. Try again.",
-      );
+      if (err instanceof ApiError && err.status === 502) {
+        setAskError(GENERATION_FAILED_MESSAGE);
+      } else {
+        setAskError(
+          err instanceof ApiError ? err.message : "Could not send your question. Try again.",
+        );
+      }
     } finally {
       setAsking(false);
     }
@@ -323,10 +425,38 @@ export default function Screen() {
                           : { backgroundColor: "#F3F5F7" }
                       }
                     >
-                      <p className="whitespace-pre-wrap">{m.content}</p>
+                      {m.role === "user" ? (
+                        <p className="whitespace-pre-wrap">{m.content}</p>
+                      ) : (
+                        <div>
+                          {/* AC-052: the Answer heading precedes the body
+                              of every assistant message. */}
+                          <h3
+                            className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
+                            style={{ color: brand.primaryColor }}
+                          >
+                            Answer
+                          </h3>
+                          <AnswerBody
+                            content={m.content}
+                            citations={m.citations}
+                            onCite={inspectCitation}
+                          />
+                        </div>
+                      )}
                     </div>
                     {m.role !== "user" ? (
                       <div className="mt-1.5">
+                        {/* AC-052: Sources follows Answer for every
+                            assistant message, even when there is nothing
+                            to list (AC-054, AC-050) -- no placeholder or
+                            invented source is ever rendered here. */}
+                        <h4
+                          className="mb-1 text-[11px] font-semibold uppercase tracking-wide"
+                          style={{ color: brand.neutralColor }}
+                        >
+                          Sources
+                        </h4>
                         {m.citations.length === 0 ? (
                           <p className="text-xs" style={{ color: brand.neutralColor }}>
                             No sources.
