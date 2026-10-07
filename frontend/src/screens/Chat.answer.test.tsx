@@ -140,9 +140,7 @@ describe("Chat screen -- answer, sources and errors (US-014-3)", () => {
     const marker = screen.getByRole("button", { name: /View source 1: Supplier Agreement/ });
     await user.click(marker);
 
-    expect(
-      await screen.findByText("Renewal term is automatic, annually."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Renewal term is automatic, annually.")).toBeInTheDocument();
   });
 
   it("AC-054: no citations means Sources shows no references and nothing invented", async () => {

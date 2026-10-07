@@ -38,7 +38,7 @@ SYSTEM_PROMPT = (
     "- If the context passages do not support any part of an answer, "
     "respond with exactly this sentence and nothing else: "
     "\"I don't have enough information in the provided context to answer "
-    "that accurately.\""
+    'that accurately."'
 )
 
 
