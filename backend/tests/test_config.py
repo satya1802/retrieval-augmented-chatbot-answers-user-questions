@@ -1,161 +1,165 @@
 """Unit tests for backend/app/config.py.
 
-config.py reads every setting once, at import time, with `os.getenv(...,
-default)`. That means the only way to observe either half of the contract
-(the default applies when nothing is set; the environment wins when it is)
-is to control the environment *before* the module is imported and reload it
-in between assertions -- a plain `import app.config` only ever runs once
-per test process and would just hand every test the same cached module.
-
-Assumption: there is no existing app/config.py test or conftest fixture for
-this reload dance, so each test below sets up its own environment with
-monkeypatch and reloads the module directly, undoing the per-test env
-afterwards via monkeypatch's own teardown (monkeypatch.setenv/delenv are
-automatically reverted). The last test in each group restores the module to
-its real-environment state for any test collected after it in the same
-session.
+`app.config` reads every setting once at import time via `os.getenv`, so the
+only way to exercise "an env var overrides the default" is to set the env
+var *before* the module is (re-)imported, then reload it. Each test restores
+the module to its unmodified state afterwards via `importlib.reload` with no
+overrides, so tests don't leak state into each other through the module
+cache.
 """
 
 import importlib
 
 import pytest
 
-from app import config as config_module
-
-ENV_VARS = (
-    "DOCUMENTS_CAP",
-    "MONTHLY_QUESTION_CAP",
-    "STORAGE_ROOT",
-    "CHUNK_SIZE",
-    "CHUNK_OVERLAP",
-    "AI_PROVIDER_EMBEDDING_MODEL",
-    "AI_PROVIDER_API_KEY",
-    "AI_PROVIDER_BASE_URL",
-)
+import app.config as config
 
 
-def reload_config(monkeypatch, **env):
-    """Clear every setting this module reads, apply `env`, then reload it.
-
-    Returns the freshly-reloaded module so assertions read the values the
-    module actually computed, not values recomputed in the test.
-    """
-    for name in ENV_VARS:
-        monkeypatch.delenv(name, raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return importlib.reload(config_module)
+def reload_config():
+    """Re-execute app.config against the current os.environ."""
+    return importlib.reload(config)
 
 
 @pytest.fixture(autouse=True)
-def _restore_module(monkeypatch):
-    """Leave app.config matching the real environment once a test is done,
-    so unrelated tests importing it afterwards see the real settings rather
-    than whatever the last config test left behind."""
+def restore_config_module():
+    """Ensure app.config reflects a clean environment again after each test,
+    regardless of what env vars an individual test set."""
     yield
-    for name in ENV_VARS:
-        monkeypatch.delenv(name, raising=False)
-    importlib.reload(config_module)
+    reload_config()
 
 
 class TestDefaults:
-    def test_defaults_apply_when_nothing_is_set(self, monkeypatch):
-        cfg = reload_config(monkeypatch)
+    """With no env vars set, every setting falls back to its documented
+    default -- this is what makes the module usable out of the box in dev
+    and in the checks, which do not export any of these."""
 
-        assert cfg.DOCUMENTS_CAP == 50
-        assert cfg.MONTHLY_QUESTION_CAP == 200
-        assert cfg.STORAGE_ROOT == "./storage"
-        assert cfg.CHUNK_SIZE == 1000
-        assert cfg.CHUNK_OVERLAP == 200
-        assert cfg.EMBEDDING_MODEL == "text-embedding-3-small"
-        assert cfg.AI_PROVIDER_API_KEY == ""
-        assert cfg.AI_PROVIDER_BASE_URL is None
+    def test_documents_cap_default(self, monkeypatch):
+        monkeypatch.delenv("DOCUMENTS_CAP", raising=False)
+        mod = reload_config()
+        assert mod.DOCUMENTS_CAP == 50
 
-    def test_default_caps_are_ints_not_strings(self, monkeypatch):
-        cfg = reload_config(monkeypatch)
+    def test_monthly_question_cap_default(self, monkeypatch):
+        monkeypatch.delenv("MONTHLY_QUESTION_CAP", raising=False)
+        mod = reload_config()
+        assert mod.MONTHLY_QUESTION_CAP == 200
 
-        assert isinstance(cfg.DOCUMENTS_CAP, int)
-        assert isinstance(cfg.MONTHLY_QUESTION_CAP, int)
-        assert isinstance(cfg.CHUNK_SIZE, int)
-        assert isinstance(cfg.CHUNK_OVERLAP, int)
+    def test_storage_root_default(self, monkeypatch):
+        monkeypatch.delenv("STORAGE_ROOT", raising=False)
+        mod = reload_config()
+        assert mod.STORAGE_ROOT == "./storage"
 
+    def test_chunk_size_default(self, monkeypatch):
+        monkeypatch.delenv("CHUNK_SIZE", raising=False)
+        mod = reload_config()
+        assert mod.CHUNK_SIZE == 1000
 
-class TestDocumentsCapIsASingleConfigurableSetting:
-    """AC-013, referenced directly in config.py's module docstring: the
-    document cap must be overridable from one place."""
+    def test_chunk_overlap_default(self, monkeypatch):
+        monkeypatch.delenv("CHUNK_OVERLAP", raising=False)
+        mod = reload_config()
+        assert mod.CHUNK_OVERLAP == 200
 
-    def test_documents_cap_overridden_by_env(self, monkeypatch):
-        cfg = reload_config(monkeypatch, DOCUMENTS_CAP="5")
+    def test_embedding_model_default(self, monkeypatch):
+        monkeypatch.delenv("AI_PROVIDER_EMBEDDING_MODEL", raising=False)
+        mod = reload_config()
+        assert mod.EMBEDDING_MODEL == "text-embedding-3-small"
 
-        assert cfg.DOCUMENTS_CAP == 5
-        assert isinstance(cfg.DOCUMENTS_CAP, int)
+    def test_ai_provider_api_key_default_is_empty_string(self, monkeypatch):
+        monkeypatch.delenv("AI_PROVIDER_API_KEY", raising=False)
+        mod = reload_config()
+        assert mod.AI_PROVIDER_API_KEY == ""
 
-    def test_monthly_question_cap_overridden_by_env(self, monkeypatch):
-        cfg = reload_config(monkeypatch, MONTHLY_QUESTION_CAP="2")
+    def test_ai_provider_base_url_default_is_none(self, monkeypatch):
+        monkeypatch.delenv("AI_PROVIDER_BASE_URL", raising=False)
+        mod = reload_config()
+        assert mod.AI_PROVIDER_BASE_URL is None
 
-        assert cfg.MONTHLY_QUESTION_CAP == 2
+    def test_chat_model_default(self, monkeypatch):
+        monkeypatch.delenv("AI_PROVIDER_CHAT_MODEL", raising=False)
+        mod = reload_config()
+        assert mod.CHAT_MODEL == "gpt-4o-mini"
 
+    def test_generation_timeout_seconds_default(self, monkeypatch):
+        monkeypatch.delenv("AI_PROVIDER_TIMEOUT_SECONDS", raising=False)
+        mod = reload_config()
+        assert mod.GENERATION_TIMEOUT_SECONDS == 30.0
 
-class TestStorageRoot:
-    def test_storage_root_overridden_by_env(self, monkeypatch):
-        cfg = reload_config(monkeypatch, STORAGE_ROOT="/var/data/uploads")
-
-        assert cfg.STORAGE_ROOT == "/var/data/uploads"
-
-
-class TestIngestionPipelineSettings:
-    """US-006-1: chunk size, overlap and the embedding model are configured
-    the same way as the fair-use caps -- a single env-backed setting each."""
-
-    def test_chunk_size_overridden_by_env(self, monkeypatch):
-        cfg = reload_config(monkeypatch, CHUNK_SIZE="500")
-
-        assert cfg.CHUNK_SIZE == 500
-        assert isinstance(cfg.CHUNK_SIZE, int)
-
-    def test_chunk_overlap_overridden_by_env(self, monkeypatch):
-        cfg = reload_config(monkeypatch, CHUNK_OVERLAP="50")
-
-        assert cfg.CHUNK_OVERLAP == 50
-        assert isinstance(cfg.CHUNK_OVERLAP, int)
-
-    def test_chunk_size_and_overlap_are_independent_settings(self, monkeypatch):
-        cfg = reload_config(monkeypatch, CHUNK_SIZE="750", CHUNK_OVERLAP="100")
-
-        assert cfg.CHUNK_SIZE == 750
-        assert cfg.CHUNK_OVERLAP == 100
-
-    def test_embedding_model_overridden_by_env(self, monkeypatch):
-        cfg = reload_config(
-            monkeypatch, AI_PROVIDER_EMBEDDING_MODEL="text-embedding-3-large"
-        )
-
-        assert cfg.EMBEDDING_MODEL == "text-embedding-3-large"
+    def test_retrieval_top_k_default(self, monkeypatch):
+        monkeypatch.delenv("RETRIEVAL_TOP_K", raising=False)
+        mod = reload_config()
+        assert mod.RETRIEVAL_TOP_K == 5
 
 
-class TestAiProviderCredentials:
-    def test_api_key_overridden_by_env(self, monkeypatch):
-        cfg = reload_config(monkeypatch, AI_PROVIDER_API_KEY="sk-test-123")
+class TestEnvOverrides:
+    """Every setting is a single, configurable value (per the module's own
+    docstring, referencing AC-013), so each one must actually change when
+    its env var is set -- not just have a default."""
 
-        assert cfg.AI_PROVIDER_API_KEY == "sk-test-123"
+    def test_documents_cap_overridden(self, monkeypatch):
+        monkeypatch.setenv("DOCUMENTS_CAP", "75")
+        mod = reload_config()
+        assert mod.DOCUMENTS_CAP == 75
+        assert isinstance(mod.DOCUMENTS_CAP, int)
 
-    def test_base_url_set_to_a_value(self, monkeypatch):
-        cfg = reload_config(
-            monkeypatch, AI_PROVIDER_BASE_URL="https://api.example.com/v1"
-        )
+    def test_monthly_question_cap_overridden(self, monkeypatch):
+        monkeypatch.setenv("MONTHLY_QUESTION_CAP", "999")
+        mod = reload_config()
+        assert mod.MONTHLY_QUESTION_CAP == 999
+        assert isinstance(mod.MONTHLY_QUESTION_CAP, int)
 
-        assert cfg.AI_PROVIDER_BASE_URL == "https://api.example.com/v1"
+    def test_storage_root_overridden(self, monkeypatch):
+        monkeypatch.setenv("STORAGE_ROOT", "/mnt/uploads")
+        mod = reload_config()
+        assert mod.STORAGE_ROOT == "/mnt/uploads"
 
-    def test_base_url_unset_is_none_not_missing_attribute(self, monkeypatch):
-        cfg = reload_config(monkeypatch)
+    def test_chunk_size_overridden(self, monkeypatch):
+        monkeypatch.setenv("CHUNK_SIZE", "500")
+        mod = reload_config()
+        assert mod.CHUNK_SIZE == 500
+        assert isinstance(mod.CHUNK_SIZE, int)
 
-        assert cfg.AI_PROVIDER_BASE_URL is None
+    def test_chunk_overlap_overridden(self, monkeypatch):
+        monkeypatch.setenv("CHUNK_OVERLAP", "50")
+        mod = reload_config()
+        assert mod.CHUNK_OVERLAP == 50
+        assert isinstance(mod.CHUNK_OVERLAP, int)
 
-    def test_base_url_set_to_empty_string_is_none(self, monkeypatch):
-        """`os.getenv(...) or None` folds a blank override (e.g. an unset
-        placeholder left as `AI_PROVIDER_BASE_URL=` in a deployment's env
-        file) to None rather than leaving it as the empty string, so callers
-        can rely on "falsy means use the provider's default base URL"."""
-        cfg = reload_config(monkeypatch, AI_PROVIDER_BASE_URL="")
+    def test_embedding_model_overridden(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER_EMBEDDING_MODEL", "text-embedding-3-large")
+        mod = reload_config()
+        assert mod.EMBEDDING_MODEL == "text-embedding-3-large"
 
-        assert cfg.AI_PROVIDER_BASE_URL is None
+    def test_ai_provider_api_key_overridden(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER_API_KEY", "sk-test-key")
+        mod = reload_config()
+        assert mod.AI_PROVIDER_API_KEY == "sk-test-key"
+
+    def test_ai_provider_base_url_overridden(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER_BASE_URL", "https://example.test/v1")
+        mod = reload_config()
+        assert mod.AI_PROVIDER_BASE_URL == "https://example.test/v1"
+
+    def test_ai_provider_base_url_empty_string_treated_as_unset(self, monkeypatch):
+        """`os.getenv("AI_PROVIDER_BASE_URL") or None` means an empty-string
+        override (e.g. an unset-but-exported var in some deploy tooling)
+        falls back to None rather than becoming an empty base URL, which
+        would break the OpenAI-compatible client's default endpoint."""
+        monkeypatch.setenv("AI_PROVIDER_BASE_URL", "")
+        mod = reload_config()
+        assert mod.AI_PROVIDER_BASE_URL is None
+
+    def test_chat_model_overridden(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER_CHAT_MODEL", "gpt-4o")
+        mod = reload_config()
+        assert mod.CHAT_MODEL == "gpt-4o"
+
+    def test_generation_timeout_seconds_overridden(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SECONDS", "10.5")
+        mod = reload_config()
+        assert mod.GENERATION_TIMEOUT_SECONDS == 10.5
+        assert isinstance(mod.GENERATION_TIMEOUT_SECONDS, float)
+
+    def test_retrieval_top_k_overridden(self, monkeypatch):
+        monkeypatch.setenv("RETRIEVAL_TOP_K", "10")
+        mod = reload_config()
+        assert mod.RETRIEVAL_TOP_K == 10
+        assert isinstance(mod.RETRIEVAL_TOP_K, int)

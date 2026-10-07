@@ -1,358 +1,323 @@
-"""Unit tests for app/services/ingestion_service.py.
+"""Unit tests for `app.services.ingestion_service`.
 
-No AC numbers are attached to this ticket, so the behaviours covered below
-come straight from the module's own docstring and code: every exit path
-lands a document in a terminal ready/failed status, a failure never raises
-past `run_ingestion` (so the background task never crashes), a failure
-clears any chunks already written for that document, and the public entry
-point used by `POST /documents` (`run_ingestion(document_id)`, no db/client
-args) opens its own session and falls back to the shared embedding client.
+The ticket carries no acceptance criteria of its own; the module's
+docstring is the specification used here: every exit path lands the
+document in a terminal `ready` or `failed` status, a failure leaves zero
+chunks behind for the document (even when chunks already existed), and the
+embedding client is an injectable seam so no test needs network access.
 
-Documents are inserted directly through `SessionLocal`, the same way
-test_chunks.py does it, rather than through the upload endpoint: that keeps
-these tests about the ingestion pipeline alone, not auth or multipart
-upload. The embedding provider is always a fake -- never the real,
-network-calling `EmbeddingClient` -- so these tests run with no API key and
-no network access.
+Everything below drives `run_ingestion` -- the module's one public, BackgroundTask
+entry point -- and then re-reads the row through a fresh session, the way the
+real caller (`POST /documents`'s background task) and anything downstream of
+it actually observe the result.
 """
+
+from __future__ import annotations
 
 import uuid
 
 import pytest
 
-from app.database import Base, SessionLocal, engine
-from app.models import Chunk, Document, User
+from app.database import SessionLocal
+from app.models import Chunk, Document
 from app.services import ingestion_service, storage
-from app.services.chunking import chunk_text
-from app.services.embedding_client import set_embedding_client
 from app.services.ingestion_service import SCANNED_PDF_MESSAGE, run_ingestion
 
 
-@pytest.fixture(autouse=True)
-def _clean_state():
-    with engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            conn.execute(table.delete())
-    yield
-
-
 class FakeEmbeddingClient:
-    """A stand-in for `EmbeddingClient` with no network and no API key.
+    """A minimal stand-in for `EmbeddingClient`: no network, deterministic
+    vectors, and an injectable failure mode."""
 
-    Records every batch it was asked to embed so a test can assert the
-    pipeline called it with exactly the chunk pieces, in order.
-    """
-
-    def __init__(self, *, fail: bool = False, mismatch: bool = False, dims: int = 2):
-        self.fail = fail
-        self.mismatch = mismatch
-        self.dims = dims
+    def __init__(self, vectors=None, raises: Exception | None = None):
+        self._vectors = vectors
+        self._raises = raises
         self.calls: list[list[str]] = []
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(list(texts))
-        if self.fail:
-            raise RuntimeError("embedding provider is down")
-        vectors = [[float(i), float(i) + 0.5][: self.dims] for i in range(len(texts))]
-        if self.mismatch and vectors:
-            vectors = vectors[:-1]
-        return vectors
+        if self._raises is not None:
+            raise self._raises
+        if self._vectors is not None:
+            return self._vectors
+        return [[float(i), float(len(text))] for i, text in enumerate(texts)]
 
 
-class _FlakyCommitSession:
-    """Wraps a real session but fails only its first `.commit()` call, so a
-    test can exercise the pipeline's rollback-and-fail path without mocking
-    SQLAlchemy out entirely. Every other attribute (query, add, rollback,
-    close, get, ...) passes straight through to the real session."""
-
-    def __init__(self, inner):
-        self._inner = inner
-        self._commit_calls = 0
-
-    def __getattr__(self, name):
-        return getattr(self._inner, name)
-
-    def commit(self):
-        self._commit_calls += 1
-        if self._commit_calls == 1:
-            raise RuntimeError("simulated commit failure")
-        self._inner.commit()
-
-
-def _make_document(
-    content: bytes, *, file_type: str = "txt", filename: str = "file.txt"
-) -> uuid.UUID:
-    """Create an owning user and a Document row whose storage_key points at
-    `content` on disk, the way POST /documents leaves it for the background
-    task to pick up."""
-    session = SessionLocal()
-    try:
-        owner = User(
-            email=f"owner-{uuid.uuid4().hex}@example.com",
-            password_hash="x",
-            is_verified=True,
-        )
-        session.add(owner)
-        session.flush()
-        doc = Document(
-            owner_id=owner.id,
-            title=filename,
-            file_type=file_type,
-            storage_key="",
-            status="processing",
-        )
-        session.add(doc)
-        session.flush()
-        doc.storage_key = storage.save_original(owner.id, doc.id, filename, content)
-        session.add(doc)
+def _make_doc_with_content(
+    make_user, make_document, content: bytes, file_type: str = "txt", filename: str = "file.txt"
+):
+    owner = make_user()
+    document = make_document(owner=owner, file_type=file_type, title=filename)
+    storage_key = storage.save_original(owner.id, document.id, filename, content)
+    document.storage_key = storage_key
+    with SessionLocal() as session:
+        row = session.get(Document, document.id)
+        row.storage_key = storage_key
         session.commit()
-        return doc.id
-    finally:
-        session.close()
+    return document
 
 
-def _make_document_with_missing_file(file_type: str = "txt") -> uuid.UUID:
-    """A document row whose storage_key points at a file that was never
-    written -- the "storage read failed" case."""
-    session = SessionLocal()
-    try:
-        owner = User(
-            email=f"owner-{uuid.uuid4().hex}@example.com",
-            password_hash="x",
-            is_verified=True,
-        )
-        session.add(owner)
-        session.flush()
-        doc = Document(
-            owner_id=owner.id,
-            title="missing.txt",
-            file_type=file_type,
-            storage_key="/nonexistent/path/does-not-exist.txt",
-            status="processing",
-        )
-        session.add(doc)
-        session.commit()
-        return doc.id
-    finally:
-        session.close()
-
-
-def _get_document(document_id: uuid.UUID) -> Document:
-    session = SessionLocal()
-    try:
+def _reload(document_id: uuid.UUID) -> Document:
+    with SessionLocal() as session:
         return session.get(Document, document_id)
-    finally:
-        session.close()
 
 
-def _get_chunks(document_id: uuid.UUID) -> list[Chunk]:
-    session = SessionLocal()
-    try:
+def _chunks_for(document_id: uuid.UUID) -> list[Chunk]:
+    with SessionLocal() as session:
         return (
             session.query(Chunk)
             .filter(Chunk.document_id == document_id)
             .order_by(Chunk.position)
             .all()
         )
-    finally:
-        session.close()
 
 
-# ---------------------------------------------------------------- success --
+# --- success path -----------------------------------------------------------
 
 
-def test_successful_ingestion_persists_chunks_in_order_and_marks_ready(monkeypatch):
-    monkeypatch.setattr(ingestion_service, "CHUNK_SIZE", 50)
-    monkeypatch.setattr(ingestion_service, "CHUNK_OVERLAP", 10)
-    text = "The quick brown fox jumps over the lazy dog. " * 5
-    expected_pieces = chunk_text(text, 50, 10)
-    assert len(expected_pieces) > 1, "test setup should produce more than one chunk"
-
-    doc_id = _make_document(text.encode("utf-8"))
+def test_successful_ingestion_lands_ready_with_chunks_and_no_failure_reason(
+    make_user, make_document, monkeypatch
+):
+    document = _make_doc_with_content(
+        make_user, make_document, b"a" * 25, file_type="txt"
+    )
+    # Small, deterministic chunk boundaries so multiple chunks are produced
+    # from a short fixture string rather than depending on the real default
+    # CHUNK_SIZE of 1000 characters.
+    monkeypatch.setattr(ingestion_service, "CHUNK_SIZE", 10)
+    monkeypatch.setattr(ingestion_service, "CHUNK_OVERLAP", 2)
     fake = FakeEmbeddingClient()
 
-    run_ingestion(doc_id, fake)
+    run_ingestion(document.id, embedding_client=fake)
 
-    document = _get_document(doc_id)
-    assert document.status == "ready"
-    assert document.failure_reason is None
+    refreshed = _reload(document.id)
+    assert refreshed.status == "ready"
+    assert refreshed.failure_reason is None
 
-    assert fake.calls == [expected_pieces]
-
-    chunks = _get_chunks(doc_id)
-    assert [c.text for c in chunks] == expected_pieces
-    assert [c.position for c in chunks] == list(range(len(expected_pieces)))
+    chunks = _chunks_for(document.id)
+    assert len(chunks) == len(fake.calls[0])
+    assert len(chunks) > 1
+    assert [c.position for c in chunks] == list(range(len(chunks)))
+    # Chunks are scoped to the document's owner directly (denormalized),
+    # per app.models.Chunk's comment that retrieval filters by owner_id.
     assert all(c.owner_id == document.owner_id for c in chunks)
-    assert chunks[0].embedding == [0.0, 0.5]
+    assert chunks[0].embedding == [0.0, float(len(chunks[0].text))]
 
 
-# ------------------------------------------------------- missing document --
+def test_run_ingestion_falls_back_to_the_shared_client_when_none_is_passed(
+    make_user, make_document, monkeypatch
+):
+    document = _make_doc_with_content(make_user, make_document, b"hello world")
+    fake = FakeEmbeddingClient(vectors=[[9.0, 9.0]])
+    monkeypatch.setattr(ingestion_service, "get_embedding_client", lambda: fake)
+
+    run_ingestion(document.id)
+
+    refreshed = _reload(document.id)
+    assert refreshed.status == "ready"
+    assert fake.calls, "the shared client returned by get_embedding_client() must be used"
 
 
-def test_ingesting_an_already_deleted_document_is_a_noop():
-    random_id = uuid.uuid4()
-
-    run_ingestion(random_id, FakeEmbeddingClient())
-
-    assert _get_document(random_id) is None
+# --- missing document --------------------------------------------------------
 
 
-# -------------------------------------------------------- storage failure --
+def test_run_ingestion_is_a_no_op_for_a_document_deleted_before_it_ran():
+    missing_id = uuid.uuid4()
+    # Must not raise, and must not conjure a row into existence.
+    run_ingestion(missing_id, embedding_client=FakeEmbeddingClient())
+    assert _reload(missing_id) is None
 
 
-def test_unreadable_storage_file_marks_document_failed_not_raised():
-    doc_id = _make_document_with_missing_file()
-
-    run_ingestion(doc_id, FakeEmbeddingClient())
-
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert "could not read the uploaded file" in document.failure_reason.lower()
-    assert _get_chunks(doc_id) == []
+# --- storage failure ----------------------------------------------------------
 
 
-# ------------------------------------------------------ extraction errors --
+def test_unreadable_storage_file_fails_the_document_with_a_readable_reason(
+    make_user, make_document
+):
+    owner = make_user()
+    document = make_document(owner=owner, storage_key="/nonexistent/path/does-not-exist.txt")
+
+    run_ingestion(document.id, embedding_client=FakeEmbeddingClient())
+
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert "Could not read the uploaded file" in refreshed.failure_reason
+    assert _chunks_for(document.id) == []
 
 
-def test_empty_document_fails_with_the_scanned_pdf_message():
-    doc_id = _make_document(b"   \n\t  ")
-
-    run_ingestion(doc_id, FakeEmbeddingClient())
-
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert document.failure_reason == SCANNED_PDF_MESSAGE
+# --- extraction failures ------------------------------------------------------
 
 
-def test_undecodable_text_file_fails_with_an_extraction_error_detail():
-    doc_id = _make_document(b"\xff\xfe\x00\x01not valid utf-8")
+def test_whitespace_only_document_fails_with_the_scanned_pdf_message(
+    make_user, make_document
+):
+    document = _make_doc_with_content(make_user, make_document, b"   \n\t  ")
 
-    run_ingestion(doc_id, FakeEmbeddingClient())
+    run_ingestion(document.id, embedding_client=FakeEmbeddingClient())
 
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert document.failure_reason.startswith("Could not extract text from this document:")
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert refreshed.failure_reason == SCANNED_PDF_MESSAGE
 
 
-def test_unexpected_extractor_crash_is_caught_as_a_failure_not_a_500(monkeypatch):
+def test_undecodable_text_file_fails_with_an_extraction_error_reason(
+    make_user, make_document
+):
+    document = _make_doc_with_content(make_user, make_document, b"\xff\xfe\xfa", file_type="txt")
+
+    run_ingestion(document.id, embedding_client=FakeEmbeddingClient())
+
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert refreshed.failure_reason.startswith("Could not extract text from this document:")
+
+
+def test_unexpected_extractor_crash_fails_cleanly_instead_of_raising(
+    make_user, make_document, monkeypatch
+):
+    document = _make_doc_with_content(make_user, make_document, b"some perfectly fine text")
+
     def _boom(file_type, content):
         raise RuntimeError("extractor exploded")
 
     monkeypatch.setattr(ingestion_service, "extract_text", _boom)
-    doc_id = _make_document(b"irrelevant, extract_text is mocked out")
 
-    run_ingestion(doc_id, FakeEmbeddingClient())
+    run_ingestion(document.id, embedding_client=FakeEmbeddingClient())
 
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert document.failure_reason == "Could not extract text from this document."
-    assert _get_chunks(doc_id) == []
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert refreshed.failure_reason == "Could not extract text from this document."
 
 
-def test_text_that_chunks_to_nothing_fails_with_the_scanned_pdf_message(monkeypatch):
-    """Defensive branch: even if extraction somehow yields text that chunks
-    to zero pieces, the pipeline still fails cleanly instead of embedding
-    an empty batch."""
-    monkeypatch.setattr(ingestion_service, "chunk_text", lambda text, size, overlap: [])
-    doc_id = _make_document(b"some text that extracts fine")
+def test_chunking_that_yields_nothing_fails_with_the_scanned_pdf_message(
+    make_user, make_document, monkeypatch
+):
+    document = _make_doc_with_content(make_user, make_document, b"some perfectly fine text")
+    monkeypatch.setattr(ingestion_service, "chunk_text", lambda *a, **k: [])
 
-    run_ingestion(doc_id, FakeEmbeddingClient())
+    run_ingestion(document.id, embedding_client=FakeEmbeddingClient())
 
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert document.failure_reason == SCANNED_PDF_MESSAGE
-
-
-# ------------------------------------------------------- embedding errors --
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert refreshed.failure_reason == SCANNED_PDF_MESSAGE
 
 
-def test_embedding_provider_failure_marks_document_failed_not_raised():
-    doc_id = _make_document(b"some perfectly readable text")
+# --- embedding failures --------------------------------------------------------
 
-    run_ingestion(doc_id, FakeEmbeddingClient(fail=True))
 
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert document.failure_reason == (
+def test_embedding_provider_failure_fails_the_document_without_raising(
+    make_user, make_document
+):
+    document = _make_doc_with_content(make_user, make_document, b"some perfectly fine text")
+    fake = FakeEmbeddingClient(raises=RuntimeError("provider is down"))
+
+    run_ingestion(document.id, embedding_client=fake)
+
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert refreshed.failure_reason == (
         "Could not generate embeddings for this document. Please try again."
     )
-    assert _get_chunks(doc_id) == []
+    assert _chunks_for(document.id) == []
 
 
-def test_mismatched_vector_count_marks_document_failed(monkeypatch):
-    monkeypatch.setattr(ingestion_service, "CHUNK_SIZE", 20)
-    monkeypatch.setattr(ingestion_service, "CHUNK_OVERLAP", 5)
-    doc_id = _make_document(b"enough distinct text to split into more than one chunk of content")
+def test_vector_count_mismatch_fails_the_document(make_user, make_document, monkeypatch):
+    document = _make_doc_with_content(make_user, make_document, b"some perfectly fine text")
+    monkeypatch.setattr(ingestion_service, "CHUNK_SIZE", 8)
+    monkeypatch.setattr(ingestion_service, "CHUNK_OVERLAP", 0)
+    fake = FakeEmbeddingClient(vectors=[[0.0, 0.0]])  # fewer vectors than chunks
 
-    run_ingestion(doc_id, FakeEmbeddingClient(mismatch=True))
+    run_ingestion(document.id, embedding_client=fake)
 
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert document.failure_reason == (
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert refreshed.failure_reason == (
         "Embedding provider returned an unexpected number of vectors."
     )
-    assert _get_chunks(doc_id) == []
 
 
-# ------------------------------------------------------ persistence / AC-023
+# --- failure always leaves zero chunks behind, even if some already existed ---
 
 
-def test_persistence_failure_rolls_back_and_leaves_the_document_with_zero_chunks(
-    monkeypatch,
+def test_a_failure_deletes_chunks_already_written_for_the_document(
+    make_user, make_document, db_session
 ):
-    monkeypatch.setattr(
-        ingestion_service,
-        "SessionLocal",
-        lambda: _FlakyCommitSession(SessionLocal()),
+    owner = make_user()
+    document = _make_doc_with_content(make_user, make_document, b"some perfectly fine text")
+    # Simulate a prior, successful ingestion run that left chunks behind.
+    db_session.add(
+        Chunk(
+            document_id=document.id,
+            owner_id=document.owner_id,
+            position=0,
+            text="stale chunk from a previous run",
+            embedding=[0.1, 0.2],
+        )
     )
-    doc_id = _make_document(b"some perfectly readable text")
+    db_session.commit()
+    assert len(_chunks_for(document.id)) == 1
 
-    run_ingestion(doc_id, FakeEmbeddingClient())
+    fake = FakeEmbeddingClient(raises=RuntimeError("provider is down"))
+    run_ingestion(document.id, embedding_client=fake)
 
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert document.failure_reason == (
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert _chunks_for(document.id) == []
+
+
+def test_re_ingestion_replaces_old_chunks_rather_than_appending(
+    make_user, make_document, db_session
+):
+    document = _make_doc_with_content(make_user, make_document, b"fresh content for re-run")
+    db_session.add(
+        Chunk(
+            document_id=document.id,
+            owner_id=document.owner_id,
+            position=0,
+            text="stale chunk from a previous run",
+            embedding=[0.1, 0.2],
+        )
+    )
+    db_session.commit()
+
+    run_ingestion(document.id, embedding_client=FakeEmbeddingClient())
+
+    refreshed = _reload(document.id)
+    assert refreshed.status == "ready"
+    chunks = _chunks_for(document.id)
+    assert all(c.text != "stale chunk from a previous run" for c in chunks)
+
+
+# --- persistence failure --------------------------------------------------------
+
+
+def test_persistence_failure_rolls_back_and_lands_failed_not_a_crash(
+    make_user, make_document, monkeypatch
+):
+    document = _make_doc_with_content(make_user, make_document, b"some perfectly fine text")
+
+    real_session_local = ingestion_service.SessionLocal
+    calls = {"n": 0}
+
+    def flaky_session_factory():
+        session = real_session_local()
+        original_commit = session.commit
+
+        def flaky_commit():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated commit failure")
+            return original_commit()
+
+        session.commit = flaky_commit
+        return session
+
+    monkeypatch.setattr(ingestion_service, "SessionLocal", flaky_session_factory)
+
+    run_ingestion(document.id, embedding_client=FakeEmbeddingClient())
+
+    refreshed = _reload(document.id)
+    assert refreshed.status == "failed"
+    assert refreshed.failure_reason == (
         "Could not save the processed document. Please try again."
     )
-    assert _get_chunks(doc_id) == []
-
-
-def test_a_document_that_failed_after_an_earlier_success_is_left_with_zero_chunks():
-    """A failed document is left with zero chunks in the index and is still
-    deletable and re-uploadable: re-ingesting a previously-`ready` document
-    that now fails must not leave its old chunks behind."""
-    doc_id = _make_document(b"some perfectly readable text")
-
-    run_ingestion(doc_id, FakeEmbeddingClient())
-    assert _get_document(doc_id).status == "ready"
-    assert len(_get_chunks(doc_id)) == 1
-
-    run_ingestion(doc_id, FakeEmbeddingClient(fail=True))
-
-    document = _get_document(doc_id)
-    assert document.status == "failed"
-    assert _get_chunks(doc_id) == []
-
-
-# --------------------------------------------- the real production call shape
-
-
-def test_run_ingestion_with_no_client_argument_falls_back_to_the_shared_default():
-    """`POST /documents` enqueues `background_tasks.add_task(run_ingestion,
-    doc.id)` -- no db session, no client. This exercises that exact call
-    shape: `run_ingestion` must open its own session and consult
-    `get_embedding_client()`/`set_embedding_client()` rather than requiring
-    a caller to pass one in."""
-    fake = FakeEmbeddingClient()
-    set_embedding_client(fake)
-    try:
-        doc_id = _make_document(b"some perfectly readable text")
-
-        run_ingestion(doc_id)
-
-        document = _get_document(doc_id)
-        assert document.status == "ready"
-        assert fake.calls, "the shared default client was never consulted"
-        assert len(_get_chunks(doc_id)) == 1
-    finally:
-        set_embedding_client(None)
+    assert _chunks_for(document.id) == []

@@ -1,11 +1,19 @@
 """Unit tests for backend/app/services/chunking.py.
 
-chunk_text is documented as a pure function: given text, chunk_size and
-overlap, it returns consecutive, overlapping slices such that a sentence
-split across a chunk boundary still reads wholly inside at least one
-chunk, empty/whitespace-only input yields no chunks, and chunk_size must
-be positive. These tests exercise that contract directly, not any
-private helper underneath it.
+chunk_text is a pure function (no app.config, no I/O), so these tests drive
+it directly with explicit chunk_size/overlap arguments rather than through
+any service or endpoint -- there is no router in front of it to exercise.
+
+No acceptance criteria were attached to this ticket; coverage below is
+derived from the module's own documented contract (its docstring):
+
+- empty/whitespace-only input -> no chunks
+- each chunk is at most chunk_size characters
+- consecutive chunks share `overlap` characters so a boundary-spanning
+  sentence still reads wholly inside at least one chunk
+- chunk_size must be positive (ValueError otherwise)
+- overlap is clamped into [0, chunk_size - 1] rather than trusted verbatim
+- no content of the stripped source text is silently skipped between chunks
 """
 
 import pytest
@@ -13,117 +21,118 @@ import pytest
 from app.services.chunking import chunk_text
 
 
-def test_empty_string_returns_no_chunks():
-    assert chunk_text("", chunk_size=10, overlap=2) == []
+class TestEmptyInput:
+    def test_empty_string_returns_no_chunks(self):
+        assert chunk_text("", chunk_size=10, overlap=2) == []
+
+    def test_whitespace_only_returns_no_chunks(self):
+        assert chunk_text("   \n\t  ", chunk_size=10, overlap=2) == []
 
 
-def test_whitespace_only_returns_no_chunks():
-    assert chunk_text("   \n\t  ", chunk_size=10, overlap=2) == []
+class TestShortText:
+    def test_text_shorter_than_chunk_size_returns_single_chunk(self):
+        assert chunk_text("hello world", chunk_size=100, overlap=10) == [
+            "hello world"
+        ]
+
+    def test_surrounding_whitespace_is_stripped(self):
+        assert chunk_text("  hello world  \n", chunk_size=100, overlap=10) == [
+            "hello world"
+        ]
+
+    def test_text_exactly_chunk_size_returns_single_chunk(self):
+        text = "a" * 20
+        assert chunk_text(text, chunk_size=20, overlap=5) == [text]
 
 
-def test_text_shorter_than_chunk_size_returns_single_chunk():
-    text = "short text"
-    result = chunk_text(text, chunk_size=1000, overlap=200)
-    assert result == [text]
+class TestChunkSizeBound:
+    def test_no_chunk_exceeds_chunk_size(self):
+        text = "x" * 2500
+        chunks = chunk_text(text, chunk_size=100, overlap=20)
+        assert len(chunks) > 1
+        assert all(len(c) <= 100 for c in chunks)
+
+    def test_chunk_size_zero_raises(self):
+        with pytest.raises(ValueError):
+            chunk_text("some text", chunk_size=0, overlap=0)
+
+    def test_negative_chunk_size_raises(self):
+        with pytest.raises(ValueError):
+            chunk_text("some text", chunk_size=-5, overlap=0)
 
 
-def test_leading_and_trailing_whitespace_is_stripped():
-    result = chunk_text("  hello world  ", chunk_size=1000, overlap=0)
-    assert result == ["hello world"]
+class TestOverlapBehaviour:
+    def test_consecutive_chunks_share_overlap_characters(self):
+        text = "abcdefghijklmnopqrstuvwxyz"
+        chunks = chunk_text(text, chunk_size=10, overlap=3)
+        assert len(chunks) > 1
+        for first, second in zip(chunks, chunks[1:]):
+            # the trailing slice of one chunk is a prefix of the next --
+            # the overlap claimed by the module's own docstring.
+            assert first[-3:] == second[: len(first[-3:])]
+
+    def test_zero_overlap_produces_exact_non_overlapping_chunks(self):
+        text = "abcdefghijklmnopqrst"  # 20 chars
+        chunks = chunk_text(text, chunk_size=5, overlap=0)
+        assert chunks == ["abcde", "fghij", "klmno", "pqrst"]
+
+    def test_negative_overlap_is_treated_as_zero(self):
+        text = "abcdefghijklmnopqrst"
+        assert chunk_text(text, chunk_size=5, overlap=-10) == chunk_text(
+            text, chunk_size=5, overlap=0
+        )
+
+    def test_overlap_equal_to_chunk_size_is_clamped_and_terminates(self):
+        text = "a" * 50
+        # overlap >= chunk_size would make step <= 0 if taken literally,
+        # looping forever; the module clamps it to chunk_size - 1 so this
+        # must still terminate and make forward progress.
+        chunks = chunk_text(text, chunk_size=10, overlap=10)
+        assert len(chunks) > 0
+        assert all(len(c) <= 10 for c in chunks)
+
+    def test_overlap_far_exceeding_chunk_size_is_clamped_and_terminates(self):
+        text = "a" * 50
+        chunks = chunk_text(text, chunk_size=10, overlap=9999)
+        assert len(chunks) > 0
+        assert all(len(c) <= 10 for c in chunks)
 
 
-def test_chunks_do_not_exceed_chunk_size():
-    text = "a" * 2500
-    result = chunk_text(text, chunk_size=1000, overlap=200)
-    assert all(len(chunk) <= 1000 for chunk in result)
+class TestBoundarySpanningContent:
+    def test_word_split_by_a_naive_boundary_reads_wholly_in_one_chunk(self):
+        # Construct text where a chunk_size-based split with no overlap
+        # would cut the word "SENTINEL" in half, and confirm overlap keeps
+        # it intact in at least one chunk -- the module's stated purpose.
+        prefix = "x" * 18
+        word = "SENTINEL"
+        suffix = "y" * 18
+        text = prefix + word + suffix
+        chunks = chunk_text(text, chunk_size=20, overlap=10)
+        assert any(word in c for c in chunks)
 
+    def test_no_character_of_the_source_is_skipped_between_chunks(self):
+        text = "The quick brown fox jumps over the lazy dog, repeatedly, " * 5
+        stripped = text.strip()
+        chunks = chunk_text(stripped, chunk_size=30, overlap=10)
+        full_concat = "".join(chunks)
+        # Every 5-character window of the source must show up somewhere in
+        # the concatenation of chunks -- if the walk ever advanced past a
+        # gap, some window here would go missing.
+        for i in range(0, len(stripped) - 5, 5):
+            window = stripped[i : i + 5]
+            assert window in full_concat, f"missing window {window!r} at {i}"
 
-def test_multiple_chunks_produced_for_long_text():
-    text = "a" * 2500
-    result = chunk_text(text, chunk_size=1000, overlap=200)
-    assert len(result) > 1
-
-
-def test_consecutive_chunks_share_overlap_characters():
-    # Overlap guarantees that the tail of one chunk reappears at the head
-    # of the next, so a sentence split at the boundary is still wholly
-    # readable inside one chunk.
-    text = "0123456789" * 50  # 500 chars
-    chunk_size = 100
-    overlap = 20
-    result = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
-    assert len(result) > 1
-    for i in range(len(result) - 1):
-        tail = result[i][-overlap:]
-        head = result[i + 1][:overlap]
-        assert tail == head
-
-
-def test_sentence_split_across_boundary_is_whole_in_one_chunk():
-    # A 10-character sentence sits straddling the boundary between the
-    # first non-overlapping window (0-40) and the second overlapping
-    # chunk (25-60): chunk_size=40, overlap=15 means consecutive chunks
-    # start 25 characters apart, so the chunk starting at 25 contains the
-    # sentence (positions 50-60) wholly, even though the first chunk
-    # (0-40) cuts it off entirely.
-    sentence = "fox jumps."
-    padding = "x" * 50
-    text = padding + sentence
-    result = chunk_text(text, chunk_size=40, overlap=15)
-    assert any(sentence in chunk for chunk in result)
-
-
-def test_zero_overlap_produces_non_overlapping_chunks():
-    text = "a" * 30
-    result = chunk_text(text, chunk_size=10, overlap=0)
-    assert result == ["a" * 10, "a" * 10, "a" * 10]
-
-
-def test_negative_overlap_is_clamped_to_zero():
-    text = "a" * 30
-    result = chunk_text(text, chunk_size=10, overlap=-5)
-    assert result == ["a" * 10, "a" * 10, "a" * 10]
-
-
-def test_overlap_greater_than_or_equal_to_chunk_size_is_clamped():
-    # effective_overlap is clamped to chunk_size - 1 so the step always
-    # advances and the function cannot loop forever.
-    text = "a" * 30
-    result = chunk_text(text, chunk_size=10, overlap=10)
-    assert len(result) > 0
-    assert all(len(chunk) <= 10 for chunk in result)
-    # Must terminate and make forward progress -- this would hang if
-    # overlap were not clamped below chunk_size.
-    assert len(result) <= 30
-
-
-def test_chunk_size_zero_raises_value_error():
-    with pytest.raises(ValueError):
-        chunk_text("some text", chunk_size=0, overlap=0)
-
-
-def test_chunk_size_negative_raises_value_error():
-    with pytest.raises(ValueError):
-        chunk_text("some text", chunk_size=-10, overlap=0)
-
-
-def test_reassembled_chunks_cover_all_characters_of_stripped_text():
-    # Every distinct character of the stripped original text should
-    # appear somewhere in the chunk sequence (allowing for overlap
-    # duplication), and the sequence should start where the text does.
-    text = "abcdefghij" * 10  # 100 chars, no whitespace
-    result = chunk_text(text, chunk_size=15, overlap=5)
-    joined = "".join(result)
-    for ch in set(text):
-        assert ch in joined
-    assert result[0][0] == text[0]
-
-
-def test_single_character_text():
-    assert chunk_text("x", chunk_size=10, overlap=5) == ["x"]
-
-
-def test_text_exactly_chunk_size_returns_single_chunk():
-    text = "a" * 10
-    result = chunk_text(text, chunk_size=10, overlap=3)
-    assert result == [text]
+    def test_chunks_appear_in_source_order(self):
+        # Use a strictly increasing marker per 10-character block so each
+        # chunk's starting position in the source is unambiguous, even
+        # though the block content itself repeats a fixed digit alphabet.
+        text = "".join(f"{i:03d}4567890" for i in range(50))  # 500 chars
+        chunks = chunk_text(text, chunk_size=50, overlap=5)
+        assert len(chunks) > 1
+        search_from = 0
+        positions = []
+        for c in chunks:
+            pos = text.index(c[:5], search_from)
+            positions.append(pos)
+            search_from = pos
+        assert positions == sorted(positions)

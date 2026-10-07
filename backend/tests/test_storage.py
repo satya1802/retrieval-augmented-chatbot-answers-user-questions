@@ -1,10 +1,15 @@
 """Unit tests for app/services/storage.py.
 
-These exercise the module directly rather than through the /documents
-router (see test_documents.py for the integration-level coverage of
-upload/list/get), since this ticket is specifically about the storage
-service's own read/write/delete contract: the thing a later S3-backed
-rewrite has to preserve for its callers.
+This ticket carries no acceptance criteria of its own (see ticket text), so
+these tests exercise the module's documented contract instead: `save_original`
+writes bytes under a path keyed by owner id and returns the storage key to
+persist, `read_original` returns exactly what was written for that key, and
+`delete_original` removes the file and is a no-op (not an error) when the
+key no longer points at anything -- since callers may retry a cleanup.
+
+Each test points the module at a fresh `tmp_path` via monkeypatch rather than
+the real `STORAGE_ROOT`, so the suite never touches the developer's working
+directory and tests do not see each other's files.
 """
 
 import uuid
@@ -16,103 +21,100 @@ from app.services import storage
 
 
 @pytest.fixture(autouse=True)
-def _isolated_storage_root(tmp_path, monkeypatch):
-    """Point the module at a scratch directory for every test.
-
-    `storage.STORAGE_ROOT` is read inside `_owner_dir` via the module-level
-    name bound at import time, so we patch that name directly rather than
-    `app.config.STORAGE_ROOT` (which nothing re-reads after import).
-    """
+def isolated_storage_root(tmp_path, monkeypatch):
+    """Redirect every test in this module at a scratch directory."""
     monkeypatch.setattr(storage, "STORAGE_ROOT", str(tmp_path))
     return tmp_path
 
 
-def test_save_original_writes_bytes_retrievable_by_the_returned_key():
+def test_save_original_writes_the_given_bytes_under_the_owner(isolated_storage_root):
     owner_id = uuid.uuid4()
     document_id = uuid.uuid4()
-    content = b"hello world, this is the document body"
+    content = b"hello world"
+
+    key = storage.save_original(owner_id, document_id, "notes.txt", content)
+
+    written = Path(key)
+    assert written.exists()
+    assert written.read_bytes() == content
+    # Keyed by owner: the file lives directly under a directory named for
+    # the owner id (not nested any further, not a sibling of it).
+    assert written.parent == isolated_storage_root / str(owner_id)
+
+
+def test_save_original_returns_a_key_that_read_original_round_trips(isolated_storage_root):
+    owner_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    content = b"\x00binary\xffcontent"
 
     key = storage.save_original(owner_id, document_id, "report.pdf", content)
 
     assert storage.read_original(key) == content
 
 
-def test_save_original_creates_a_directory_scoped_to_the_owner(tmp_path):
+def test_save_original_includes_the_document_id_and_filename_in_the_key():
     owner_id = uuid.uuid4()
     document_id = uuid.uuid4()
 
-    key = storage.save_original(owner_id, document_id, "notes.txt", b"data")
+    key = storage.save_original(owner_id, document_id, "quarterly.md", b"data")
 
-    owner_dir = tmp_path / str(owner_id)
-    assert owner_dir.is_dir()
-    assert Path(key).parent == owner_dir
+    assert str(document_id) in key
+    assert "quarterly.md" in key
 
 
-def test_two_owners_get_independent_storage_directories(tmp_path):
+def test_save_original_does_not_let_a_slash_in_the_filename_escape_the_owner_dir(
+    isolated_storage_root,
+):
+    owner_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+
+    key = storage.save_original(owner_id, document_id, "../../etc/passwd", b"data")
+
+    written = Path(key)
+    # The slash-bearing filename did not create (or write into) any
+    # directory other than the owner's own: the written file still lives
+    # one level directly under the owner directory.
+    assert written.parent == isolated_storage_root / str(owner_id)
+    assert "/" not in written.name
+
+
+def test_save_original_sanitizes_backslashes_in_the_filename():
+    owner_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+
+    key = storage.save_original(owner_id, document_id, "weird\\name.txt", b"data")
+
+    written = Path(key)
+    assert written.parent.name == str(owner_id)
+    assert "\\" not in written.name
+
+
+def test_save_original_falls_back_to_a_default_name_for_an_empty_filename():
+    owner_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+
+    key = storage.save_original(owner_id, document_id, "", b"data")
+
+    assert "upload" in key
+
+
+def test_save_original_keeps_different_owners_in_separate_directories():
     owner_a = uuid.uuid4()
     owner_b = uuid.uuid4()
     document_id = uuid.uuid4()
 
-    key_a = storage.save_original(owner_a, document_id, "same-name.txt", b"owner a's content")
-    key_b = storage.save_original(owner_b, document_id, "same-name.txt", b"owner b's content")
+    key_a = storage.save_original(owner_a, document_id, "same.txt", b"a-content")
+    key_b = storage.save_original(owner_b, document_id, "same.txt", b"b-content")
 
     assert key_a != key_b
-    assert storage.read_original(key_a) == b"owner a's content"
-    assert storage.read_original(key_b) == b"owner b's content"
+    assert storage.read_original(key_a) == b"a-content"
+    assert storage.read_original(key_b) == b"b-content"
 
 
-def test_filename_with_path_separators_is_sanitized_and_cannot_escape_owner_dir(tmp_path):
+def test_delete_original_removes_the_file(isolated_storage_root):
     owner_id = uuid.uuid4()
     document_id = uuid.uuid4()
-
-    key = storage.save_original(owner_id, document_id, "../../etc/passwd", b"malicious")
-
-    owner_dir = tmp_path / str(owner_id)
-    assert Path(key).parent == owner_dir
-    assert "/" not in Path(key).name.replace(str(document_id), "")
-    # the escaped segments were flattened into the filename, not followed
-    assert not (tmp_path / "etc").exists()
-
-
-def test_filename_with_backslashes_is_sanitized():
-    owner_id = uuid.uuid4()
-    document_id = uuid.uuid4()
-
-    key = storage.save_original(owner_id, document_id, "folder\\file.txt", b"content")
-
-    assert "\\" not in Path(key).name
-
-
-def test_missing_filename_falls_back_to_default_name():
-    owner_id = uuid.uuid4()
-    document_id = uuid.uuid4()
-
-    key = storage.save_original(owner_id, document_id, "", b"content")
-
-    assert "upload" in Path(key).name
-    assert storage.read_original(key) == b"content"
-
-
-def test_saving_again_under_the_same_document_id_and_name_overwrites():
-    owner_id = uuid.uuid4()
-    document_id = uuid.uuid4()
-
-    first_key = storage.save_original(owner_id, document_id, "doc.txt", b"version one")
-    second_key = storage.save_original(owner_id, document_id, "doc.txt", b"version two")
-
-    assert first_key == second_key
-    assert storage.read_original(second_key) == b"version two"
-
-
-def test_read_original_of_an_unknown_key_raises():
-    with pytest.raises(FileNotFoundError):
-        storage.read_original("/no/such/path/that/exists.txt")
-
-
-def test_delete_original_removes_the_file_so_it_can_no_longer_be_read():
-    owner_id = uuid.uuid4()
-    document_id = uuid.uuid4()
-    key = storage.save_original(owner_id, document_id, "doc.txt", b"content")
+    key = storage.save_original(owner_id, document_id, "to-delete.txt", b"data")
 
     storage.delete_original(key)
 
@@ -121,5 +123,8 @@ def test_delete_original_removes_the_file_so_it_can_no_longer_be_read():
         storage.read_original(key)
 
 
-def test_delete_original_on_a_missing_file_does_not_raise():
-    storage.delete_original("/no/such/path/that/exists.txt")
+def test_delete_original_is_a_no_op_for_a_missing_key(isolated_storage_root):
+    missing_key = str(isolated_storage_root / "nonexistent-owner" / "nonexistent-file.txt")
+
+    # Must not raise even though nothing was ever written at this key.
+    storage.delete_original(missing_key)

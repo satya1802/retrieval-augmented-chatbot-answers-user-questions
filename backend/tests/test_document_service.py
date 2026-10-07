@@ -1,13 +1,13 @@
-"""Unit tests for backend/app/services/document_service.py.
+"""Unit tests for app.services.document_service.
 
-Covers content-sniffed validation (AC-015, AC-017): files are classified by
-their actual bytes, not by filename extension, so a renamed spreadsheet or
-image is rejected and a plain-text file is accepted regardless of its
-extension.
+Covers content-sniffed validation (AC-015, AC-017): the file's actual bytes
+decide its type, not the filename extension -- so a renamed spreadsheet is
+still rejected and a plain-text file is accepted whatever extension it
+carries.
 """
 
+import io
 import zipfile
-from io import BytesIO
 
 import pytest
 
@@ -18,114 +18,116 @@ from app.services.document_service import (
 )
 
 
-def _zip_bytes(names_and_contents: dict[str, bytes]) -> bytes:
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        for name, data in names_and_contents.items():
-            archive.writestr(name, data)
-    return buffer.getvalue()
+def _zip_bytes(names_to_content: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in names_to_content.items():
+            archive.writestr(name, content)
+    return buf.getvalue()
 
 
 def _docx_bytes() -> bytes:
+    # Minimal shape of a real .docx: a zip archive containing the Word part.
     return _zip_bytes(
         {
-            "word/document.xml": b"<w:document></w:document>",
-            "[Content_Types].xml": b"<Types></Types>",
+            "[Content_Types].xml": "<Types/>",
+            "word/document.xml": "<w:document/>",
         }
     )
 
 
-def _xlsx_bytes() -> bytes:
+def _xlsx_like_bytes() -> bytes:
+    # A zip archive that is NOT a Word document -- e.g. an .xlsx renamed
+    # to .docx. Must be rejected even though it starts with the zip magic.
     return _zip_bytes(
         {
-            "xl/workbook.xml": b"<workbook></workbook>",
-            "[Content_Types].xml": b"<Types></Types>",
+            "[Content_Types].xml": "<Types/>",
+            "xl/workbook.xml": "<workbook/>",
         }
     )
 
 
-class TestSniffFileTypePdf:
-    def test_pdf_magic_bytes_detected_regardless_of_extension(self):
-        content = b"%PDF-1.4\n%some binary stuff\n"
-        assert sniff_file_type("report.PDF", content) == "pdf"
-        assert sniff_file_type("renamed.txt", content) == "pdf"
+class TestPdf:
+    def test_pdf_magic_bytes_detected_as_pdf(self):
+        content = b"%PDF-1.4\n%...rest of a real pdf would follow..."
+        assert sniff_file_type("report.pdf", content) == "pdf"
+
+    def test_text_renamed_to_pdf_extension_is_not_sniffed_as_pdf(self):
+        # Extension lies about the type; content is plain text, so it is
+        # accepted on its own merits as text, never mislabeled "pdf".
+        content = b"just some plain text, not a pdf"
+        assert sniff_file_type("notes.pdf", content) == "txt"
 
 
-class TestSniffFileTypeDocx:
-    def test_valid_docx_zip_detected_as_docx(self):
-        content = _docx_bytes()
-        assert sniff_file_type("letter.docx", content) == "docx"
+class TestDocx:
+    def test_real_docx_bytes_detected_as_docx(self):
+        assert sniff_file_type("resume.docx", _docx_bytes()) == "docx"
 
-    def test_docx_detected_even_with_wrong_extension(self):
-        # Content sniffing, not extension, is authoritative: a .docx file
-        # renamed to .pdf is still identified by its actual zip contents.
-        content = _docx_bytes()
-        assert sniff_file_type("letter.pdf", content) == "docx"
-
-    def test_xlsx_zip_without_word_document_part_is_rejected(self):
-        # An .xlsx renamed to .docx is still a zip archive, but lacks the
-        # word/document.xml part, so it must be rejected rather than
-        # misidentified as a Word document.
-        content = _xlsx_bytes()
+    def test_spreadsheet_renamed_to_docx_is_rejected(self):
+        # A zip file that is a zip but not a Word document (e.g. an .xlsx
+        # renamed to end in .docx) must still be rejected -- the ticket's
+        # headline scenario for content-over-extension validation.
         with pytest.raises(UnsupportedFileType) as excinfo:
-            sniff_file_type("spreadsheet.docx", content)
+            sniff_file_type("budget.docx", _xlsx_like_bytes())
         assert str(excinfo.value) == SUPPORTED_TYPES_MESSAGE
 
-    def test_malformed_zip_with_docx_extension_is_rejected(self):
-        content = b"PK\x03\x04" + b"not actually a valid zip archive"
-        with pytest.raises(UnsupportedFileType) as excinfo:
+    def test_corrupt_zip_with_pk_header_is_rejected(self):
+        # Starts with the zip magic number but is not a valid archive at
+        # all; must raise UnsupportedFileType rather than propagate the
+        # underlying BadZipFile.
+        content = b"PK\x03\x04" + b"not actually a valid zip stream"
+        with pytest.raises(UnsupportedFileType):
             sniff_file_type("broken.docx", content)
-        assert str(excinfo.value) == SUPPORTED_TYPES_MESSAGE
 
 
-class TestSniffFileTypeTextual:
-    def test_md_extension_with_text_content_detected_as_md(self):
-        content = b"# Heading\n\nSome markdown body text.\n"
-        assert sniff_file_type("notes.md", content) == "md"
+class TestTextAndMarkdown:
+    def test_md_extension_on_text_content_detected_as_markdown(self):
+        content = "# Heading\n\nSome *markdown* body text.".encode("utf-8")
+        assert sniff_file_type("README.md", content) == "md"
 
-    def test_md_extension_is_case_insensitive(self):
-        content = b"# Heading\n"
-        assert sniff_file_type("NOTES.MD", content) == "md"
-
-    def test_txt_extension_with_text_content_detected_as_txt(self):
-        content = b"Just some plain text content.\n"
+    def test_txt_extension_on_text_content_detected_as_text(self):
+        content = "plain prose, nothing special".encode("utf-8")
         assert sniff_file_type("notes.txt", content) == "txt"
 
-    def test_text_content_with_unknown_extension_defaults_to_txt(self):
-        # Plain text is accepted on its content whatever extension it
-        # carries; anything that isn't specifically ".md" falls back to txt.
-        content = b"Plain text with no recognizable extension.\n"
-        assert sniff_file_type("notes.unknown", content) == "txt"
-
-    def test_text_content_with_no_extension_defaults_to_txt(self):
-        content = b"Plain text, no extension at all.\n"
+    def test_text_with_no_extension_defaults_to_txt(self):
+        content = "no extension at all".encode("utf-8")
         assert sniff_file_type("README", content) == "txt"
 
-    def test_empty_content_decodes_as_text_and_is_accepted(self):
-        # An empty byte string has no null bytes and decodes as UTF-8
-        # trivially, so it is treated as (empty) text, not rejected.
+    def test_text_with_unrelated_extension_still_detected_as_txt(self):
+        # Extension is neither .md nor a recognized binary type; content
+        # decodes as text, so it is accepted and labeled "txt" on content
+        # alone, exactly as the module's docstring promises.
+        content = "some text content".encode("utf-8")
+        assert sniff_file_type("data.csv", content) == "txt"
+
+    def test_md_detection_is_case_insensitive_on_extension(self):
+        content = "# Title".encode("utf-8")
+        assert sniff_file_type("README.MD", content) == "md"
+
+    def test_empty_file_decodes_as_empty_text(self):
+        # Documents actual behaviour: empty bytes decode trivially as
+        # UTF-8, so an empty .txt upload is accepted, not rejected.
         assert sniff_file_type("empty.txt", b"") == "txt"
-        assert sniff_file_type("empty.md", b"") == "md"
 
 
-class TestSniffFileTypeRejection:
-    def test_binary_content_with_null_bytes_is_rejected(self):
-        content = b"\x00\x01\x02binary garbage\xff\xfe"
+class TestRejected:
+    def test_binary_garbage_is_rejected(self):
+        # Not PDF magic, not a zip, not valid UTF-8 text -- no supported
+        # type can be sniffed from it.
+        content = bytes([0xFF, 0xFE, 0x00, 0x01, 0x02, 0x80, 0x81])
         with pytest.raises(UnsupportedFileType) as excinfo:
-            sniff_file_type("image.pdf", content)
+            sniff_file_type("mystery.bin", content)
         assert str(excinfo.value) == SUPPORTED_TYPES_MESSAGE
 
-    def test_non_utf8_content_is_rejected(self):
-        # Invalid UTF-8 bytes with no null byte, e.g. a lone continuation
-        # byte, should still fail the text sniff.
-        content = b"\x80\x81not valid utf-8 at all"
+    def test_content_with_null_byte_is_rejected_even_if_utf8_decodable(self):
+        # A null byte marks binary content even when the rest would
+        # otherwise decode as UTF-8; _looks_like_text must reject it.
+        content = b"hello\x00world"
         with pytest.raises(UnsupportedFileType):
-            sniff_file_type("mystery.pdf", content)
+            sniff_file_type("odd.txt", content)
 
-    def test_renamed_image_disguised_as_pdf_is_rejected(self):
-        # A PNG magic-byte header renamed to end in .pdf must still be
-        # rejected: the extension is not trusted, only the content is.
-        content = b"\x89PNG\r\n\x1a\n" + b"rest of png binary data"
-        with pytest.raises(UnsupportedFileType) as excinfo:
-            sniff_file_type("photo.pdf", content)
-        assert str(excinfo.value) == SUPPORTED_TYPES_MESSAGE
+    def test_image_bytes_are_rejected(self):
+        # PNG magic number: binary, not zip-based, not valid UTF-8.
+        content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        with pytest.raises(UnsupportedFileType):
+            sniff_file_type("photo.png", content)

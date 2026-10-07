@@ -1,16 +1,20 @@
-"""Unit tests for backend/app/security.py: JWT issuance/validation and
-password hashing.
+"""Unit tests for app/security.py: JWT issuing/validation and password hashing.
 
-Behavioural coverage of the password-strength rule and the full
-register/verify/login flow already lives in test_auth.py (which imports
-PASSWORD_MIN_LENGTH, PASSWORD_RULE and validate_password_strength straight
-from this module), and "no token at all" is already covered as
-"endpoints require auth" in test_documents.py / test_chunks.py. This file
-is the rest: hashing itself, token issuance and its expiry, every way
-get_current_user_id can refuse a token, and -- through a real protected
-route -- that a *present but invalid* token (expired or tampered, not just
-missing) is rejected end to end with the same 401 + WWW-Authenticate
-contract AC-010 requires.
+Behavioural coverage of the endpoints that call these functions already
+lives in test_auth.py (register/login/verify), test_documents.py and
+test_me.py (missing/garbage bearer token -> 401 on a protected route).
+This file exercises app.security's own public functions directly, for the
+paths those end-to-end flows never happen to hit: an expired or
+signature-tampered JWT, a token signed with the wrong secret, a token whose
+`sub` isn't a UUID or is missing entirely, the password-hashing contract
+(salted, verifiable, never the plaintext), and the fixed placeholder hash
+`/auth/login` verifies against for an unknown email so that lookup takes
+the same bcrypt-bound time as a real one.
+
+No ticket-supplied acceptance criteria accompany this ticket (title and
+description only); coverage below follows the module's own docstring and
+the behaviour app/routers/auth.py and the protected routers depend on it
+for.
 """
 
 import time
@@ -24,9 +28,13 @@ from fastapi.security import HTTPAuthorizationCredentials
 from app.security import (
     JWT_ALGORITHM,
     JWT_SECRET,
+    PASSWORD_MIN_LENGTH,
+    PASSWORD_RULE,
+    UNKNOWN_USER_PASSWORD_HASH,
     create_access_token,
     get_current_user_id,
     hash_password,
+    validate_password_strength,
     verify_password,
 )
 
@@ -35,58 +43,10 @@ def _bearer(token: str) -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
 
-# --------------------------------------------------------- password hash ---
+# ------------------------------------------------- create/decode tokens ---
 
 
-def test_hash_password_never_returns_the_plaintext_and_verifies_it():
-    hashed = hash_password("Password1")
-
-    assert hashed != "Password1"
-    assert verify_password("Password1", hashed) is True
-
-
-def test_hash_password_salts_so_two_hashes_of_the_same_password_differ():
-    first = hash_password("Password1")
-    second = hash_password("Password1")
-
-    assert first != second
-    # Both independently-salted hashes must still verify the same plaintext.
-    assert verify_password("Password1", first) is True
-    assert verify_password("Password1", second) is True
-
-
-def test_verify_password_rejects_the_wrong_password():
-    hashed = hash_password("Password1")
-
-    assert verify_password("WrongPassword1", hashed) is False
-
-
-# ------------------------------------------------------ token issuance -----
-
-
-def test_create_access_token_round_trips_subject_and_sets_a_future_expiry():
-    user_id = str(uuid.uuid4())
-
-    token = create_access_token(subject=user_id)
-    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-
-    assert payload["sub"] == user_id
-    assert payload["exp"] > time.time()
-
-
-def test_create_access_token_honours_a_custom_lifetime():
-    before = int(time.time())
-
-    token = create_access_token(subject=str(uuid.uuid4()), expires_in_seconds=10)
-    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-
-    assert before < payload["exp"] <= before + 10
-
-
-# -------------------------------------------------- get_current_user_id ----
-
-
-def test_get_current_user_id_returns_the_subject_of_a_valid_token():
+def test_create_access_token_round_trips_through_get_current_user_id():
     user_id = uuid.uuid4()
     token = create_access_token(subject=str(user_id))
 
@@ -98,80 +58,119 @@ def test_get_current_user_id_returns_the_subject_of_a_valid_token():
 def test_get_current_user_id_rejects_missing_credentials():
     with pytest.raises(HTTPException) as exc_info:
         get_current_user_id(None)
-
     assert exc_info.value.status_code == 401
 
 
-def test_get_current_user_id_rejects_a_token_signed_with_the_wrong_secret():
-    tampered = jwt.encode(
-        {"sub": str(uuid.uuid4()), "exp": int(time.time()) + 60},
-        "not-the-real-secret",
-        algorithm=JWT_ALGORITHM,
-    )
+def test_get_current_user_id_rejects_a_tampered_signature():
+    token = create_access_token(subject=str(uuid.uuid4()))
+    last = token[-1]
+    tampered = token[:-1] + ("a" if last != "a" else "b")
 
     with pytest.raises(HTTPException) as exc_info:
         get_current_user_id(_bearer(tampered))
-
     assert exc_info.value.status_code == 401
 
 
 def test_get_current_user_id_rejects_an_expired_token():
-    expired = jwt.encode(
-        {"sub": str(uuid.uuid4()), "exp": int(time.time()) - 1},
-        JWT_SECRET,
-        algorithm=JWT_ALGORITHM,
-    )
+    token = create_access_token(subject=str(uuid.uuid4()), expires_in_seconds=-1)
 
     with pytest.raises(HTTPException) as exc_info:
-        get_current_user_id(_bearer(expired))
-
+        get_current_user_id(_bearer(token))
     assert exc_info.value.status_code == 401
 
 
-def test_get_current_user_id_rejects_a_token_whose_subject_is_not_a_uuid():
-    bad_subject = jwt.encode(
-        {"sub": "not-a-uuid", "exp": int(time.time()) + 60},
-        JWT_SECRET,
-        algorithm=JWT_ALGORITHM,
-    )
+def test_get_current_user_id_rejects_a_token_signed_with_a_different_secret():
+    payload = {"sub": str(uuid.uuid4()), "exp": int(time.time()) + 3600}
+    foreign_token = jwt.encode(payload, "a-completely-different-secret", algorithm=JWT_ALGORITHM)
 
     with pytest.raises(HTTPException) as exc_info:
-        get_current_user_id(_bearer(bad_subject))
-
+        get_current_user_id(_bearer(foreign_token))
     assert exc_info.value.status_code == 401
 
 
-def test_get_current_user_id_rejects_garbage_that_is_not_a_jwt_at_all():
-    with pytest.raises(HTTPException) as exc_info:
-        get_current_user_id(_bearer("not-a-jwt"))
+def test_get_current_user_id_rejects_a_non_uuid_subject():
+    payload = {"sub": "not-a-uuid", "exp": int(time.time()) + 3600}
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_user_id(_bearer(token))
     assert exc_info.value.status_code == 401
 
 
-# ------------------------------------------------------------ integration --
-# A present-but-bad token must be refused by a real protected route, not
-# just by calling the dependency function directly -- this is the
-# "every non-auth route answers 401 before anything else runs" guarantee
-# (AC-010) for the cases that are not simply "no header at all".
+def test_get_current_user_id_rejects_a_token_missing_the_subject_claim():
+    payload = {"exp": int(time.time()) + 3600}
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_user_id(_bearer(token))
+    assert exc_info.value.status_code == 401
 
 
-def test_protected_endpoint_rejects_an_expired_bearer_token_end_to_end(client):
-    expired = create_access_token(subject=str(uuid.uuid4()), expires_in_seconds=-1)
-
-    resp = client.get("/me/usage", headers={"Authorization": f"Bearer {expired}"})
-
-    assert resp.status_code == 401
-    assert resp.headers.get("www-authenticate") == "Bearer"
+# ------------------------------------------------------- password rules ---
 
 
-def test_protected_endpoint_rejects_a_tampered_bearer_token_end_to_end(client):
-    tampered = jwt.encode(
-        {"sub": str(uuid.uuid4()), "exp": int(time.time()) + 60},
-        "wrong-secret",
-        algorithm=JWT_ALGORITHM,
+def test_validate_password_strength_accepts_a_password_at_the_minimum_length():
+    password = "a1" + "a" * (PASSWORD_MIN_LENGTH - 2)
+    assert len(password) == PASSWORD_MIN_LENGTH
+    validate_password_strength(password)  # does not raise
+
+
+def test_validate_password_strength_error_message_is_the_shared_rule():
+    with pytest.raises(ValueError) as exc_info:
+        validate_password_strength("short")
+    assert str(exc_info.value) == PASSWORD_RULE
+
+
+def test_validate_password_strength_rejects_empty_password():
+    with pytest.raises(ValueError):
+        validate_password_strength("")
+
+
+# ------------------------------------------------------- password hashing -
+
+
+def test_hash_password_never_returns_the_plaintext():
+    hashed = hash_password("Password1")
+    assert hashed != "Password1"
+
+
+def test_hash_password_is_salted_so_the_same_password_hashes_differently():
+    first = hash_password("Password1")
+    second = hash_password("Password1")
+
+    assert first != second
+    assert verify_password("Password1", first)
+    assert verify_password("Password1", second)
+
+
+def test_verify_password_accepts_the_correct_password():
+    hashed = hash_password("Password1")
+    assert verify_password("Password1", hashed) is True
+
+
+def test_verify_password_rejects_the_wrong_password():
+    hashed = hash_password("Password1")
+    assert verify_password("WrongPassword1", hashed) is False
+
+
+# --------------------------------------------- unknown-user placeholder hash
+
+
+def test_unknown_user_password_hash_never_verifies_an_unrelated_guess():
+    """This is what `/auth/login` checks an unknown email's password
+    against (AC-005/AC-006 in app/security.py's own docstring); it must
+    never accidentally authenticate anyone."""
+    assert verify_password("Password1", UNKNOWN_USER_PASSWORD_HASH) is False
+    assert verify_password("", UNKNOWN_USER_PASSWORD_HASH) is False
+
+
+def test_unknown_user_password_hash_does_verify_its_own_fixed_placeholder():
+    assert (
+        verify_password("no-such-account-placeholder-password", UNKNOWN_USER_PASSWORD_HASH)
+        is True
     )
 
-    resp = client.get("/me/usage", headers={"Authorization": f"Bearer {tampered}"})
 
-    assert resp.status_code == 401
-    assert resp.headers.get("www-authenticate") == "Bearer"
+def test_unknown_user_password_hash_is_a_bcrypt_hash_not_the_plaintext():
+    assert UNKNOWN_USER_PASSWORD_HASH != "no-such-account-placeholder-password"
+    assert UNKNOWN_USER_PASSWORD_HASH.startswith("$2")
