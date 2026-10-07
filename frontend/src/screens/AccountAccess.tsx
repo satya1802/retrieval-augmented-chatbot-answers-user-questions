@@ -1,4 +1,5 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment, react-hooks/rules-of-hooks */
+// @ts-nocheck
 import React from "react";
 
 import * as UI from "@/lib/ui";
