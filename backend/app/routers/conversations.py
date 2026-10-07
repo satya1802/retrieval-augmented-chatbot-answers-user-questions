@@ -20,6 +20,18 @@ terminal `done` event carrying the persisted message and its citations, or
 an `error` event when generation fails part-way. A caller that sends
 neither gets the exact same JSON response as before (`AskQuestionResponse`)
 -- the streaming branch is additive, not a replacement.
+
+US-022-1 makes the retrieval driving a follow-up question
+conversation-aware: before a question is embedded and retrieved on, it is
+rewritten into a standalone query from that same conversation's own prior
+user/assistant turns (app.services.query_rewrite.build_standalone_query).
+A conversation's first question -- no prior turns -- is used verbatim, with
+no rewrite call at all; any failure rewriting degrades to the raw question,
+never a 500. The rewritten query drives retrieval only -- the persisted
+user message, the generation prompt, and every response shape are
+unchanged; a client cannot tell this happened except that pronouns and
+elided subjects in a follow-up now resolve against the conversation's own
+history instead of either being ignored or bleeding in from elsewhere.
 """
 
 import json
@@ -49,6 +61,7 @@ from app.schemas import (
 from app.security import get_current_user_id
 from app.services import usage_service
 from app.services.generation_client import REFUSAL_MESSAGE, GenerationError, get_generation_client
+from app.services.query_rewrite import build_standalone_query
 from app.services.retrieval import READY_STATUS, ContextChunk, retrieve_context
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -160,6 +173,21 @@ def _build_context_text(chunks: list[ContextChunk]) -> str:
         for idx, chunk in enumerate(chunks, start=1)
     ]
     return "\n\n".join(sections)
+
+
+def _prior_turns(db: Session, conversation_id: uuid.UUID) -> list[tuple[str, str]]:
+    """The target conversation's own prior user/assistant turns, in order,
+    and nothing else (US-022-1) -- filtered by `conversation_id` at the
+    query level, so a rewrite can never draw on another conversation's (or
+    another user's) history. Called before the new user turn is persisted,
+    so it never includes the question currently being asked."""
+    rows = (
+        db.query(Message.role, Message.content)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at)
+        .all()
+    )
+    return [(role, content) for role, content in rows]
 
 
 def _wants_stream(request: Request) -> bool:
@@ -284,14 +312,28 @@ async def ask_question(
     db: _DbSession,
 ) -> AskQuestionResponse | StreamingResponse:
     """AC-039, AC-040, AC-041, AC-038, AC-032, AC-012, AC-009, AC-045
-    through AC-051, AC-059 through AC-066, AC-070: ownership and the
-    monthly question cap are both enforced before anything else runs,
-    including before any embedding/retrieval/generation call (AC-012), and
-    an empty or whitespace-only question is rejected with 422 before any of
-    that too. Retrieval is then scoped to exactly
+    through AC-051, AC-059 through AC-066, AC-070, AC-073 through AC-076:
+    ownership and the monthly question cap are both enforced before
+    anything else runs, including before any embedding/retrieval/generation
+    call (AC-012), and an empty or whitespace-only question is rejected
+    with 422 before any of that too. Retrieval is then scoped to exactly
     `conversation.scope_document_ids` when a scope is set (AC-039) -- so
     chunks from an unselected document are never in the context set -- or
     to all of the caller's ready documents when no scope is set (AC-040).
+
+    US-022-1: the query retrieval runs against is not the raw question
+    verbatim once the conversation already has prior turns -- it is that
+    question rewritten into a standalone query from exactly this
+    conversation's own prior user/assistant turns
+    (`app.services.query_rewrite.build_standalone_query`), so a follow-up's
+    pronouns and elided subjects resolve against its own conversation's
+    history and never another conversation's or user's. A conversation's
+    first question has no prior turns, so it is used verbatim with no
+    rewrite call at all; a rewrite failure degrades to the raw question
+    rather than failing the request. Only the query driving retrieval
+    changes -- the persisted user message is always the raw question, and
+    the generation prompt is built from the retrieved chunks exactly as
+    before.
 
     A caller with no ready documents at all in the relevant scope never
     reaches retrieval -- let alone an embedding or generation provider call
@@ -328,6 +370,11 @@ async def ask_question(
     user = db.get(User, user_id)
     usage_service.enforce_question_capacity(db, user, cap=MONTHLY_QUESTION_CAP)
 
+    # US-022-1: captured before the new user turn is persisted below, and
+    # filtered to this conversation_id alone, so a rewrite can only ever
+    # see this conversation's own prior turns.
+    prior_turns = _prior_turns(db, conversation.id)
+
     scope_ids = (
         [uuid.UUID(doc_id) for doc_id in conversation.scope_document_ids]
         if conversation.scope_document_ids
@@ -347,9 +394,11 @@ async def ask_question(
     db.add(user_message)
     db.commit()
 
+    retrieval_query = build_standalone_query(prior_turns, body.question)
+
     retrieved: list[ContextChunk] = []
     if has_ready_documents:
-        retrieved = retrieve_context(db, user_id, body.question, document_ids=scope_ids)
+        retrieved = retrieve_context(db, user_id, retrieval_query, document_ids=scope_ids)
 
     if _wants_stream(request):
         if not has_ready_documents:

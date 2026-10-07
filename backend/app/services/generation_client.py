@@ -1,5 +1,6 @@
 """Hosted chat/generation provider client, behind one injectable, mockable
-seam (US-014-1, extended by US-018-1, extended for streaming by US-020-1).
+seam (US-014-1, extended by US-018-1, extended for streaming by US-020-1,
+extended for follow-up query rewriting by US-022-1).
 
 Mirrors app/services/embedding_client.py: every call site asks
 `get_generation_client()` for the shared instance rather than constructing
@@ -96,6 +97,25 @@ SYSTEM_PROMPT = (
     "the supplied context passages cover, never answer it from outside "
     "or general knowledge -- either ask exactly one clarifying question, "
     "or respond with exactly the insufficient-context sentence above."
+)
+
+# US-022-1: instructions for the separate, much smaller rewrite call that
+# turns a follow-up question into a standalone one before it is embedded
+# for retrieval. Deliberately asks only for a rewrite, never an answer, and
+# explicitly forbids adding information the history does not contain, so a
+# rewrite can never smuggle outside knowledge into what retrieval searches
+# for.
+REWRITE_SYSTEM_PROMPT = (
+    "You rewrite a user's follow-up question into a standalone question, "
+    "using ONLY the conversation history supplied below to resolve "
+    "pronouns, elided subjects, and other references back to earlier "
+    "turns. Do not answer the question. Do not add any fact, entity, or "
+    "detail the history does not already contain. Preserve the original "
+    "question's intent and scope exactly -- do not narrow or broaden what "
+    "is being asked. If the follow-up is already a standalone question "
+    "with nothing to resolve, return it unchanged. Respond with only the "
+    "rewritten standalone question and nothing else -- no preamble, no "
+    "quotation marks, no explanation."
 )
 
 
@@ -198,6 +218,41 @@ class GenerationClient:
 
         if not emitted_any:
             raise GenerationError("the hosted provider returned an empty answer")
+
+    @staticmethod
+    def _rewrite_user_prompt(history: list[tuple[str, str]], follow_up: str) -> str:
+        transcript = "\n".join(f"{role}: {content}" for role, content in history)
+        return (
+            f"Conversation history:\n{transcript}\n\n"
+            f"Follow-up question: {follow_up}\n\n"
+            "Standalone question:"
+        )
+
+    def rewrite_query(self, history: list[tuple[str, str]], follow_up: str) -> str:
+        """Turn `follow_up` into a standalone query using `history` -- the
+        target conversation's own prior (role, content) turns, in order,
+        and nothing else (US-022-1). Uses the same provider seam as
+        `generate`/`generate_stream`, not a second provider path. Any SDK
+        failure, timeout, or empty response is raised as `GenerationError`;
+        callers (see app.services.query_rewrite) catch this and degrade to
+        `follow_up` verbatim rather than fail the request."""
+        try:
+            response = self._client().chat.completions.create(
+                model=self.model,
+                timeout=self.timeout,
+                messages=[
+                    {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
+                    {"role": "user", "content": self._rewrite_user_prompt(history, follow_up)},
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001 -- any provider/SDK failure is one error type
+            raise GenerationError("the hosted provider rewrite call failed") from exc
+
+        choice = response.choices[0] if response.choices else None
+        content = choice.message.content if choice is not None and choice.message else None
+        if not content or not content.strip():
+            raise GenerationError("the hosted provider returned an empty rewrite")
+        return content.strip()
 
 
 _default_client: GenerationClient | None = None

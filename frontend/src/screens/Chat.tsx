@@ -272,7 +272,12 @@ export default function Screen() {
   // needed, appending the user's question and an empty assistant draft,
   // then streaming the answer into that draft token by token. Shared by
   // the composer submit and the Retry control so a retry is exactly
-  // "re-ask the same question" rather than a second code path.
+  // "re-ask the same question" rather than a second code path. AC-074:
+  // when `activeId` is already set (a conversation opened from the
+  // sidebar, or one just created in this same flow), the question is
+  // posted to that same conversation's `/messages` endpoint rather than
+  // creating a new one -- this is the only branch that calls
+  // `createConversation`, and it only runs when no conversation is active.
   async function askFlow(trimmed: string) {
     setAsking(true);
     setAskError("");
@@ -280,6 +285,10 @@ export default function Screen() {
     try {
       let conversationId = activeId;
       if (!conversationId) {
+        // AC-076: a fresh conversation is created via POST /conversations
+        // on the first question of a "New conversation" session, and the
+        // returned record is unshifted into the sidebar list so it shows
+        // up as its own, separate entry immediately.
         const scope_document_ids = scopeMode === "custom" ? Array.from(customScopeIds) : undefined;
         const created = await createConversation({ scope_document_ids });
         conversationId = created.conversation.id;
@@ -377,6 +386,14 @@ export default function Screen() {
     await askFlow(lastQuestion);
   }
 
+  // AC-071, AC-072: fetches the exact chunk a source reference (Sources
+  // list entry or inline "[n]" marker) points to. A citation with no
+  // `chunk_id` (its document was deleted after the citation was recorded)
+  // never calls the API at all -- there is nothing left to fetch -- and
+  // goes straight to the same non-leaking "unavailable" message that a
+  // 404/403 from `getChunk` produces. Either way, `chunk` is only ever set
+  // from a successful response, so an error state never carries over
+  // chunk text from a previous lookup.
   async function inspectCitation(citation: CitationOut) {
     setActiveCitation(citation);
     setChunk(null);
@@ -392,11 +409,13 @@ export default function Screen() {
       const detail = await getChunk(citation.chunk_id);
       setChunk(detail);
       setChunkState("ready");
-    } catch (err) {
+    } catch {
+      // AC-072: a chunk id the caller does not own returns an error from
+      // the API (404, to avoid confirming the id exists at all) -- shown
+      // here as the same non-leaking message regardless of status, with
+      // `chunk` left null so no chunk text is ever rendered for it.
       setChunkState("error");
-      setChunkError(
-        err instanceof ApiError && err.status === 404 ? NOT_FOUND_EVIDENCE : NOT_FOUND_EVIDENCE,
-      );
+      setChunkError(NOT_FOUND_EVIDENCE);
     } finally {
       if (evidenceHeadingRef.current) evidenceHeadingRef.current.focus();
     }
@@ -735,8 +754,15 @@ export default function Screen() {
               </p>
             ) : chunkState === "ready" && chunk ? (
               <div>
+                {/* AC-071: the document title and the chunk's position
+                    within that document are shown alongside its text --
+                    the two identifying facts a reader needs to locate
+                    this passage, next to the exact text retrieved. */}
                 <p className="text-xs font-semibold" style={{ color: brand.primaryColor }}>
                   {chunk.document_title}
+                </p>
+                <p className="text-xs" style={{ color: brand.neutralColor }}>
+                  Position {chunk.position} in this document
                 </p>
                 <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed">{chunk.text}</p>
                 <button
