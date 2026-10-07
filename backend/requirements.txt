@@ -34,6 +34,12 @@ openai>=1.50
 # pgvector-enabled server (see app/models.py Embedding type).
 pgvector>=0.3
 
+# Document ingestion (US-006-1): extract text from the two binary formats
+# the uploader accepts. Markdown and plain text need no library -- they
+# decode directly.
+pypdf>=5.0
+python-docx>=1.1
+
 # Checks. The platform installs and runs this file before it reports that the
 # generated tests pass, so the test dependencies belong here rather than in a
 # second file nobody installs. httpx is what fastapi.testclient runs on.

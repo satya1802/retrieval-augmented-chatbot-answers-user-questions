@@ -8,7 +8,15 @@ is the single helper that does it.
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app.config import DOCUMENTS_CAP
@@ -29,6 +37,7 @@ from app.services.document_service import (
     UnsupportedFileType,
     sniff_file_type,
 )
+from app.services.ingestion_service import run_ingestion
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -40,11 +49,18 @@ _DbSession = Annotated[Session, Depends(get_db)]
 async def upload_document(
     user_id: _CurrentUserId,
     db: _DbSession,
+    background_tasks: BackgroundTasks,
     files: Annotated[list[UploadFile], File(...)],
 ) -> DocumentCreateResponse:
     """AC-014, AC-015, AC-016, AC-017: file upload only (no URL source);
     sniff each file's real content; one bad file in a multi-file upload does
-    not block the others; enforce the single configurable document cap."""
+    not block the others; enforce the single configurable document cap.
+
+    AC-018, AC-021: each accepted file is enqueued for out-of-request
+    ingestion (extract, chunk, embed, persist) so the response returns 202
+    immediately and the client never holds the connection open while that
+    runs.
+    """
     is_single = len(files) == 1
     sniffed: list[tuple[str, str, bytes]] = []
     rejected: list[RejectedFileOut] = []
@@ -92,6 +108,7 @@ async def upload_document(
     db.commit()
     for doc in created:
         db.refresh(doc)
+        background_tasks.add_task(run_ingestion, doc.id)
 
     return DocumentCreateResponse(
         documents=[DocumentOut.model_validate(doc) for doc in created],
