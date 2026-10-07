@@ -166,8 +166,7 @@ export default function Screen() {
     try {
       let conversationId = activeId;
       if (!conversationId) {
-        const scope_document_ids =
-          scopeMode === "custom" ? Array.from(customScopeIds) : undefined;
+        const scope_document_ids = scopeMode === "custom" ? Array.from(customScopeIds) : undefined;
         const created = await createConversation({ scope_document_ids });
         conversationId = created.conversation.id;
         setActiveId(conversationId);
@@ -437,7 +436,9 @@ export default function Screen() {
                   }
                 >
                   Use all ready documents
-                  {scopeMode === "all" ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+                  {scopeMode === "all" ? (
+                    <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : null}
                 </button>
                 <ul className="max-h-64 space-y-1 overflow-y-auto">
                   {readyDocuments.map((doc) => (
